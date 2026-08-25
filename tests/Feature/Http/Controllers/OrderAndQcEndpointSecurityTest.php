@@ -213,6 +213,9 @@ class OrderAndQcEndpointSecurityTest extends TestCase
 
     public function test_branch_01_user_can_see_all_branches_on_order_create_page(): void
     {
+        // Orders keeps the head-office exception (unlike Kanban/Dashboard,
+        // which use applyStrictBranchScope()): branch 01 (Nong Bua Lamphu)
+        // sees every branch's order data here.
         $branch01 = Branch::create([
             'branch_code' => '01',
             'branch_name' => 'Nong Bua Lamphu',
@@ -236,6 +239,126 @@ class OrderAndQcEndpointSecurityTest extends TestCase
         $response->assertInertia(fn (Assert $page) => $page
             ->component('Orders/Create')
             ->has('branches', 2)
+        );
+
+        $this->assertNotSame($branch01->id, $branch02->id);
+    }
+
+    public function test_branch_01_user_sees_every_branch_order_on_order_list_page(): void
+    {
+        // Same head-office exception on the Orders list itself (not just the
+        // create-page branch dropdown): branch 01 sees orders from every
+        // branch here, unlike Kanban/Dashboard which stay strictly scoped.
+        $branch01 = Branch::create([
+            'branch_code' => '01',
+            'branch_name' => 'Nong Bua Lamphu',
+        ]);
+
+        $branch02 = Branch::create([
+            'branch_code' => '02',
+            'branch_name' => 'Khon Kaen',
+        ]);
+
+        $customer = Customer::create([
+            'customer_code' => 'CUS-B01-LIST',
+            'customer_name' => 'Branch List Customer',
+        ]);
+
+        $user = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+            'access_role' => AccessRole::Owner,
+            'branch_id' => $branch01->id,
+        ]);
+
+        Order::create([
+            'order_code' => 'ORD-B01-LIST-001',
+            'customer_id' => $customer->id,
+            'branch_id' => $branch01->id,
+            'creator_user_id' => $user->id,
+            'job_name' => 'Branch 01 Order',
+            'job_type' => 'uniform',
+            'order_date' => now(),
+            'due_date' => now()->addDays(3),
+            'order_status' => OrderStatus::Confirmed,
+        ]);
+
+        Order::create([
+            'order_code' => 'ORD-B02-LIST-001',
+            'customer_id' => $customer->id,
+            'branch_id' => $branch02->id,
+            'creator_user_id' => $user->id,
+            'job_name' => 'Branch 02 Order',
+            'job_type' => 'uniform',
+            'order_date' => now(),
+            'due_date' => now()->addDays(3),
+            'order_status' => OrderStatus::Confirmed,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('orders.index'));
+
+        $response->assertOk();
+        $response->assertInertia(fn (Assert $page) => $page
+            ->component('Orders/Index')
+            ->has('orders.data', 2)
+        );
+    }
+
+    public function test_non_branch_01_user_sees_only_own_branch_order_on_order_list_page(): void
+    {
+        $branch01 = Branch::create([
+            'branch_code' => '01',
+            'branch_name' => 'Nong Bua Lamphu',
+        ]);
+
+        $branch02 = Branch::create([
+            'branch_code' => '02',
+            'branch_name' => 'Khon Kaen',
+        ]);
+
+        $customer = Customer::create([
+            'customer_code' => 'CUS-B02-LIST',
+            'customer_name' => 'Branch List Customer 2',
+        ]);
+
+        $user = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+            'access_role' => AccessRole::Counter,
+            'branch_id' => $branch02->id,
+        ]);
+
+        Order::create([
+            'order_code' => 'ORD-B01-LIST-002',
+            'customer_id' => $customer->id,
+            'branch_id' => $branch01->id,
+            'creator_user_id' => $user->id,
+            'job_name' => 'Branch 01 Order',
+            'job_type' => 'uniform',
+            'order_date' => now(),
+            'due_date' => now()->addDays(3),
+            'order_status' => OrderStatus::Confirmed,
+        ]);
+
+        Order::create([
+            'order_code' => 'ORD-B02-LIST-002',
+            'customer_id' => $customer->id,
+            'branch_id' => $branch02->id,
+            'creator_user_id' => $user->id,
+            'job_name' => 'Branch 02 Order',
+            'job_type' => 'uniform',
+            'order_date' => now(),
+            'due_date' => now()->addDays(3),
+            'order_status' => OrderStatus::Confirmed,
+        ]);
+
+        $response = $this->actingAs($user)->get(route('orders.index'));
+
+        $response->assertOk();
+        $response->assertInertia(fn (Assert $page) => $page
+            ->component('Orders/Index')
+            ->has('orders.data', 1)
+            ->where('orders.data.0.order_code', 'ORD-B02-LIST-002')
         );
     }
 
@@ -311,6 +434,56 @@ class OrderAndQcEndpointSecurityTest extends TestCase
             ->where('order.job_name', 'Edit Prefill Job')
             ->where('order.delivery_method', 'shipping')
             ->where('order.shipping_address', '123 Prefill Street')
+        );
+    }
+
+    public function test_order_create_page_includes_daily_capacity_and_due_date_loads(): void
+    {
+        $salesUser = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        $customer = Customer::create([
+            'customer_code' => 'CUS-CAPACITY-001',
+            'customer_name' => 'Capacity Customer',
+        ]);
+
+        $branch = Branch::create([
+            'branch_code' => 'CAP-01',
+            'branch_name' => 'Capacity Branch',
+        ]);
+
+        $order = Order::create([
+            'order_code' => 'ORD-CAPACITY-001',
+            'customer_id' => $customer->id,
+            'branch_id' => $branch->id,
+            'creator_user_id' => $salesUser->id,
+            'job_name' => 'Capacity Order',
+            'job_type' => 'uniform',
+            'order_date' => now(),
+            'due_date' => now()->addDays(5),
+            'order_status' => OrderStatus::Confirmed,
+        ]);
+
+        $order->items()->create([
+            'item_type' => 'garment',
+            'size_group' => 'adults',
+            'size_label' => 'M',
+            'quantity' => 200,
+            'unit_price' => 100,
+            'total_price' => 20000,
+        ]);
+
+        $response = $this->actingAs($salesUser)->get(route('orders.create'));
+
+        $response->assertOk();
+        $response->assertInertia(fn (Assert $page) => $page
+            ->component('Orders/Create')
+            ->where('dailyProductionCapacity', 200)
+            ->has('deliveryDateLoads', 1)
+            ->where('deliveryDateLoads.0.date', now()->addDays(5)->toDateString())
+            ->where('deliveryDateLoads.0.total_quantity', 200)
         );
     }
 

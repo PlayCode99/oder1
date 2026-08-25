@@ -11,6 +11,7 @@ use App\Http\Controllers\Settings\BranchManagementController;
 use App\Http\Controllers\Settings\CuttingTeamController;
 use App\Http\Controllers\Settings\EmbroideryTeamController;
 use App\Http\Controllers\Settings\HeatPressMachineController;
+use App\Http\Controllers\Settings\ProductionDailySettingController;
 use App\Http\Controllers\Settings\ScreenTeamController;
 use App\Http\Controllers\Settings\SewingTeamController;
 use App\Http\Controllers\QcInspectionController;
@@ -76,6 +77,8 @@ Route::middleware(['auth'])->group(function () {
     Route::post('settings/data/heat-press-machines', [HeatPressMachineController::class, 'store'])->name('settings.data.heat-press-machines.store');
     Route::put('settings/data/heat-press-machines/{heatPressMachine}', [HeatPressMachineController::class, 'update'])->name('settings.data.heat-press-machines.update');
     Route::delete('settings/data/heat-press-machines/{heatPressMachine}', [HeatPressMachineController::class, 'destroy'])->name('settings.data.heat-press-machines.destroy');
+    Route::get('settings/data/production-capacity', [ProductionDailySettingController::class, 'index'])->name('settings.data.production-capacity.index');
+    Route::put('settings/data/production-capacity', [ProductionDailySettingController::class, 'update'])->name('settings.data.production-capacity.update');
     Route::get('settings/data/garments/types', [GarmentPricingController::class, 'types'])
         ->name('settings.data.garments.types');
     Route::post('settings/data/garments/types', [GarmentPricingController::class, 'storeType'])

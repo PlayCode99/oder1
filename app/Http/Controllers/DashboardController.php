@@ -726,8 +726,8 @@ class DashboardController extends Controller
 
         $branchesQuery = Branch::query()->select(['id', 'branch_name'])->orderBy('branch_name');
 
-        if (! UserAccessControl::hasCrossBranchAccess($actor) && $actor->branch_id !== null) {
-            $branchesQuery->where('id', (int) $actor->branch_id);
+        if ($actor->branch_id !== null) {
+            UserAccessControl::applyBranchScope($branchesQuery, $actor, 'id');
         }
 
         $branches = $branchesQuery
@@ -755,8 +755,8 @@ class DashboardController extends Controller
             ])
             ->latest('order_date');
 
-        if (! UserAccessControl::hasCrossBranchAccess($actor) && $actor->branch_id !== null) {
-            $ordersQuery->where('branch_id', (int) $actor->branch_id);
+        if ($actor->branch_id !== null) {
+            UserAccessControl::applyBranchScope($ordersQuery, $actor);
         }
 
         if (($filters['search'] ?? null) !== null && $filters['search'] !== '') {
@@ -868,6 +868,7 @@ class DashboardController extends Controller
                 'branch_name' => $order->branch?->branch_name ?? '-',
                 'customer_name' => $order->customer?->customer_name ?? '-',
                 'job_type' => $order->job_type,
+                'order_status' => $order->order_status->value,
                 'status' => $this->mapOrderToCounterStatus($order),
                 'receipt_code' => $latestReceipt?->receipt_code,
                 'payment_status' => $paymentStatus,

@@ -3,6 +3,23 @@ import { describe, expect, it } from 'vitest';
 import { buildEditInitialFormData } from '@/pages/Orders/Create';
 
 describe('buildEditInitialFormData', () => {
+    it('defaults a new order to the signed-in user branch instead of the first listed branch', () => {
+        const result = buildEditInitialFormData(null, {
+            resolvedBranches: [
+                { id: 1, name: 'Branch 01', code: '01', phone: null },
+                { id: 2, name: 'Branch 02', code: '02', phone: null },
+            ],
+            defaultBranchId: 2,
+            resolvedJobTypes: [{ id: 1, name: 'uniform' }],
+            resolvedShirtTypes: [{ id: 1, name: 'Shirt' }],
+            resolvedPantsTypes: [{ id: 1, name: 'Pants' }],
+            resolvedKidsSizes: ['S'],
+            resolvedAdultSizes: ['M'],
+        });
+
+        expect(result.branch_id).toBe('2');
+    });
+
     it('reconstructs the saved groups to their own size tables and keeps artwork previews', () => {
         const result = buildEditInitialFormData(
             {

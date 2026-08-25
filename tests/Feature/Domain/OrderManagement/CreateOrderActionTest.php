@@ -123,7 +123,7 @@ class CreateOrderActionTest extends TestCase
 
             $this->assertDatabaseHas('orders', [
                 'id' => $order->id,
-                'order_status' => OrderStatus::Draft->value,
+                'order_status' => OrderStatus::Confirmed->value,
             ]);
 
             $firstStation = RoutingStationName::from($expectedStations[0]);
@@ -202,7 +202,7 @@ class CreateOrderActionTest extends TestCase
         $this->assertSame(750.0, (float) $order->total_amount);
         $this->assertSame(75.0, (float) $order->discount_amount);
         $this->assertSame(675.0, (float) $order->net_amount);
-        $this->assertSame(OrderStatus::Draft, $order->order_status);
+        $this->assertSame(OrderStatus::Confirmed, $order->order_status);
 
         $this->assertCount(2, $order->items);
         $this->assertSame(500.0, (float) $order->items[0]->total_price);

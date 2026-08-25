@@ -47,6 +47,7 @@ export interface OrderTableRow {
     branch_name: string;
     customer_name: string;
     job_type: string;
+    order_status: string;
     status: 'design' | 'print_room' | 'cutting' | 'heat_press' | 'embroidery' | 'sewing' | 'screen_flex' | 'qc' | 'shipping' | 'completed';
     receipt_code?: string;
     payment_status: 'paid' | 'deposit' | 'pending';
@@ -453,8 +454,14 @@ function routingStatusLabel(status: string): string {
     return labels[status] ?? status;
 }
 
-export function canEditOrderStatus(row: { orderStatus?: string | null; status?: string | null } | null | undefined): boolean {
-    return true;
+export function canEditOrderStatus(row: { orderStatus?: string | null; hasProductionProgress?: boolean } | null | undefined): boolean {
+    if (!row) {
+        return false;
+    }
+
+    const normalizedOrderStatus = row.orderStatus?.trim().toLowerCase();
+
+    return normalizedOrderStatus === 'confirmed' && !row.hasProductionProgress;
 }
 
 function OrderVirtualizedGrid({
@@ -508,8 +515,8 @@ function OrderVirtualizedGrid({
                     {virtualRows.map((virtualRow) => {
                         const row = rows[virtualRow.index];
                         const canEdit = canEditOrderStatus({
-                            orderStatus: row.details?.order_status ?? null,
-                            status: row.status,
+                            orderStatus: row.order_status,
+                            hasProductionProgress: row.details?.routings?.some((routing) => routing.is_required && ['in_progress', 'completed'].includes(routing.status)) ?? false,
                         });
 
                         return (
@@ -593,7 +600,7 @@ function OrderVirtualizedGrid({
                                                         router.visit(`/orders/${row.id}/edit`);
                                                     }
                                                 }}
-                                                title={canEdit ? 'แก้ไขออเดอร์' : 'ไม่สามารถแก้ไขได้หลังสถานะกำลังดำเนินการ'}
+                                                title={canEdit ? 'แก้ไขออเดอร์' : 'แก้ไขได้เฉพาะออเดอร์สถานะยืนยันแล้ว'}
                                                 className={`size-7 ${canEdit ? 'text-slate-500 hover:text-[#E21E26]' : 'cursor-not-allowed text-slate-300'}`}
                                             >
                                                 <Pencil className="size-3.5" />

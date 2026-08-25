@@ -91,7 +91,7 @@ class CreateOrderAction
                     'discount_percent' => $discountPercent,
                     'discount_amount' => $discountAmount,
                     'net_amount' => $netAmount,
-                    'order_status' => OrderStatus::Draft,
+                    'order_status' => OrderStatus::Confirmed,
                 ]);
 
                 if (! empty($data['specification']) && is_array($data['specification'])) {

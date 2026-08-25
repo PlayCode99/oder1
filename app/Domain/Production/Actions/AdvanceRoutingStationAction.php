@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Production\Actions;
 
+use App\Enums\OrderStatus;
 use App\Enums\RoutingStationName;
 use App\Enums\RoutingStatus;
 use App\Models\Order;
@@ -144,6 +145,13 @@ class AdvanceRoutingStationAction
             }
 
             $routing->save();
+
+            if (
+                ($newStatus === RoutingStatus::InProgress || ($newStatus === RoutingStatus::Completed && $allowDirectCompletion))
+                && $order->order_status?->canEnterProduction() === true
+            ) {
+                $order->update(['order_status' => OrderStatus::InProduction]);
+            }
 
             if ($allowDirectCompletion && $newStatus === RoutingStatus::Completed && in_array($stationName, [RoutingStationName::Screen, RoutingStationName::Flex], true)) {
                 $siblings = OrderRouting::query()

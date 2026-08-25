@@ -236,6 +236,10 @@ export function AppSidebar() {
                     href: '/settings/data/branches',
                 },
                 {
+                    title: 'กำลังผลิตต่อวัน',
+                    href: '/settings/data/production-capacity',
+                },
+                {
                     title: 'ประเภทงาน',
                     href: '/settings/data/job-types',
                 },

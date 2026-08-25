@@ -25,6 +25,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useWebpCompress } from '@/hooks/useWebpCompress';
+import { DeliveryDatePicker, type DeliveryDateLoad } from '@/components/domain/orders/DeliveryDatePicker';
 
 type DeliveryMethod = 'pickup' | 'shipping' | 'onsite';
 type PaymentMethod = 'cash' | 'transfer';
@@ -209,6 +210,9 @@ type OrderCreatePageProps = {
     pantsTypes?: OptionItem[];
     kidsSizes?: string[];
     adultSizes?: string[];
+    defaultBranchId?: number | null;
+    dailyProductionCapacity?: number;
+    deliveryDateLoads?: DeliveryDateLoad[];
     order?: EditOrderPayload | null;
 };
 
@@ -500,6 +504,7 @@ function toNumberValueFromUnknown(value: unknown): number {
 
 export function buildEditInitialFormData(order: EditOrderPayload | null | undefined, args: {
     resolvedBranches: BranchOption[];
+    defaultBranchId?: number | null;
     resolvedJobTypes: OptionItem[];
     resolvedShirtTypes: OptionItem[];
     resolvedPantsTypes: OptionItem[];
@@ -513,7 +518,7 @@ export function buildEditInitialFormData(order: EditOrderPayload | null | undefi
     if (!order) {
         return {
             customer_id: '',
-            branch_id: args.resolvedBranches[0] ? String(args.resolvedBranches[0].id) : '',
+            branch_id: args.defaultBranchId ? String(args.defaultBranchId) : (args.resolvedBranches[0] ? String(args.resolvedBranches[0].id) : ''),
             customer_name: '',
             customer_phone: '',
             contact_detail: '',
@@ -929,6 +934,9 @@ export default function OrderCreatePage({
     pantsTypes,
     kidsSizes,
     adultSizes,
+    defaultBranchId,
+    dailyProductionCapacity = 200,
+    deliveryDateLoads = [],
     order,
 }: OrderCreatePageProps) {
     const { compressImage, isCompressing, error: compressError } = useWebpCompress();
@@ -986,13 +994,14 @@ export default function OrderCreatePage({
     const initialFormData = useMemo(
         () => buildEditInitialFormData(order, {
             resolvedBranches,
+            defaultBranchId,
             resolvedJobTypes,
             resolvedShirtTypes,
             resolvedPantsTypes,
             resolvedKidsSizes,
             resolvedAdultSizes,
         }),
-        [order, resolvedBranches, resolvedJobTypes, resolvedShirtTypes, resolvedPantsTypes, resolvedKidsSizes, resolvedAdultSizes],
+        [order, resolvedBranches, defaultBranchId, resolvedJobTypes, resolvedShirtTypes, resolvedPantsTypes, resolvedKidsSizes, resolvedAdultSizes],
     );
 
     const { data, setData, post, put, processing, errors, transform } = useForm<OrderCreateFormData>(initialFormData);
@@ -1393,6 +1402,14 @@ export default function OrderCreatePage({
             missing.push('สาขา');
         }
 
+        const requestItems = sizeFormMode === 'matrix'
+            ? buildRequestItems(data.size_tables)
+            : buildRequestItemsFromIndividual(data.personalization_rows);
+
+        if (requestItems.length === 0) {
+            missing.push('จำนวนและราคาสินค้าอย่างน้อย 1 รายการ');
+        }
+
         if (data.size_tables.some((table) => table.rows.some((row) => !row.size_label))) {
             missing.push('ไซส์ในตารางเลือกไซซ์');
         }
@@ -1461,6 +1478,14 @@ export default function OrderCreatePage({
     const submit = () => {
         const selectedJobType = resolvedJobTypes.find((item) => String(item.id) === data.job_type_id)?.name ?? data.job_name;
         const requestItems = sizeFormMode === 'matrix' ? buildRequestItems(data.size_tables) : buildRequestItemsFromIndividual(data.personalization_rows);
+
+        if (requestItems.length === 0) {
+            setValidationErrors(['จำนวนและราคาสินค้าอย่างน้อย 1 รายการ']);
+            setShowValidationModal(true);
+
+            return;
+        }
+
         const isEditing = Boolean(order?.id);
         const normalizedDueDate = data.due_date && data.due_date >= data.billing_date ? data.due_date : data.billing_date;
         const activeSpecValues = activeSpecTab === 'pants' ? data.pants_specs : data.shirt_specs;
@@ -1807,12 +1832,12 @@ export default function OrderCreatePage({
 
                                     <label className="grid gap-1.5 text-xs">
                                         <span className="font-semibold text-slate-600">วันที่รับสินค้า</span>
-                                        <Input
-                                            type="date"
+                                        <DeliveryDatePicker
                                             value={data.due_date}
-                                            onChange={(event) => setData('due_date', event.target.value)}
-                                            min={data.billing_date}
-                                            className="h-9 text-xs"
+                                            minDate={data.billing_date}
+                                            dailyCapacity={dailyProductionCapacity}
+                                            loads={deliveryDateLoads}
+                                            onChange={(date) => setData('due_date', date)}
                                         />
                                     </label>
                                 </div>

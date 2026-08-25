@@ -4,6 +4,7 @@ namespace Tests\Feature\Domain\Production;
 
 use App\Domain\OrderManagement\Actions\CreateOrderAction;
 use App\Domain\Production\Actions\AdvanceRoutingStationAction;
+use App\Enums\OrderStatus;
 use App\Enums\RoutingStationName;
 use App\Enums\RoutingStatus;
 use App\Enums\StationDepartment;
@@ -197,6 +198,75 @@ class AdvanceRoutingStationActionTest extends TestCase
         );
 
         $this->assertSame(RoutingStatus::InProgress, $routing->status);
+    }
+
+    /**
+     * Regression test: order_status previously never left "draft" during
+     * production (only CreateOrderAction and the QC action ever wrote to it),
+     * so App\Enums\OrderStatus::canBeEdited() looked correct in isolation but
+     * never actually blocked editing a real in-production order. The first
+     * station to genuinely start must promote the order out of the editable
+     * pre-production statuses, and later station changes must not regress it.
+     */
+    public function test_it_promotes_order_status_to_in_production_when_the_first_station_starts(): void
+    {
+        $order = $this->createOrderWithJobType('งานปัก');
+        $worker = User::factory()->create([
+            'role' => UserRole::ProductionManager,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        $this->assertSame(OrderStatus::Confirmed, $order->order_status);
+        $this->assertTrue($order->order_status->canBeEdited());
+        $this->assertTrue($order->order_status->canEnterProduction());
+
+        (new AdvanceRoutingStationAction())->execute(
+            $order,
+            RoutingStationName::Cutting,
+            RoutingStatus::InProgress,
+            $worker->id,
+        );
+
+        $order->refresh();
+
+        $this->assertSame(OrderStatus::InProduction, $order->order_status);
+        $this->assertFalse($order->order_status->canBeEdited());
+
+        // Completing that same station (or advancing later ones) must not
+        // regress order_status or flip canBeEdited() back to true.
+        (new AdvanceRoutingStationAction())->execute(
+            $order,
+            RoutingStationName::Cutting,
+            RoutingStatus::Completed,
+            $worker->id,
+        );
+
+        $order->refresh();
+
+        $this->assertSame(OrderStatus::InProduction, $order->order_status);
+        $this->assertFalse($order->order_status->canBeEdited());
+    }
+
+    public function test_it_promotes_order_status_to_in_production_when_a_station_is_directly_completed(): void
+    {
+        $order = $this->createOrderWithJobType('งานปัก');
+        $worker = User::factory()->create([
+            'role' => UserRole::ProductionManager,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        (new AdvanceRoutingStationAction())->execute(
+            $order,
+            RoutingStationName::Cutting,
+            RoutingStatus::Completed,
+            $worker->id,
+            allowDirectCompletion: true,
+        );
+
+        $order->refresh();
+
+        $this->assertSame(OrderStatus::InProduction, $order->order_status);
+        $this->assertFalse($order->order_status->canBeEdited());
     }
 
     private function createOrderWithJobType(string $jobType): Order

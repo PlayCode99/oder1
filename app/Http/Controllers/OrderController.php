@@ -12,13 +12,15 @@ use App\Models\Branch;
 use App\Models\CatalogItem;
 use App\Models\Customer;
 use App\Models\GarmentType;
-use App\Support\UserAccessControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Inertia\Inertia;
 use Inertia\Response;
 use App\Models\Order;
+use App\Models\ProductionDailySetting;
+use App\Support\UserAccessControl;
 
 class OrderController extends Controller
 {
@@ -208,6 +210,10 @@ class OrderController extends Controller
             ->orderBy('branch_name');
 
         if (! UserAccessControl::hasCrossBranchAccess($actor) && $actor->branch_id !== null) {
+            // Orders page keeps the head-office exception: branch 01 (Nong
+            // Bua Lamphu) sees every branch's order data here, same as
+            // User/Branch Management. Kanban and Dashboard/Counter stay on
+            // the strict per-branch scope (see UserAccessControl::applyStrictBranchScope()).
             $branchesQuery->where('id', (int) $actor->branch_id);
         }
 
@@ -287,6 +293,21 @@ class OrderController extends Controller
             ];
         }
 
+        $deliveryDateLoads = Order::query()
+            ->whereNotIn('order_status', [OrderStatus::Cancelled, OrderStatus::Completed])
+            ->when($order !== null, fn ($query) => $query->whereKeyNot($order->id))
+            ->whereDate('due_date', '>=', today())
+            ->join('order_items', 'orders.id', '=', 'order_items.order_id')
+            ->selectRaw('DATE(orders.due_date) as due_date, SUM(order_items.quantity) as total_quantity')
+            ->groupByRaw('DATE(orders.due_date)')
+            ->orderBy('due_date')
+            ->get()
+            ->map(fn ($row): array => [
+                'date' => Carbon::parse((string) $row->due_date)->toDateString(),
+                'total_quantity' => (int) $row->total_quantity,
+            ])
+            ->values();
+
         return Inertia::render('Orders/Create', [
             'customers' => $customers,
             'branches' => $branches,
@@ -299,6 +320,9 @@ class OrderController extends Controller
             'pantsTypes' => $this->garmentTypeOptions('PANTS'),
             'kidsSizes' => $this->sizeOptionsFromStorageKey('jssport.size-kids'),
             'adultSizes' => $this->sizeOptionsFromStorageKey('jssport.size-adults'),
+            'defaultBranchId' => $order === null ? $actor->branch_id : null,
+            'dailyProductionCapacity' => ProductionDailySetting::query()->first()?->daily_capacity ?? 200,
+            'deliveryDateLoads' => $deliveryDateLoads,
             'order' => $orderPayload,
         ]);
     }
@@ -339,6 +363,10 @@ class OrderController extends Controller
         $query = Order::query()->with(['customer', 'branch', 'media']);
 
         if (! UserAccessControl::hasCrossBranchAccess($actor) && $actor->branch_id !== null) {
+            // Orders page keeps the head-office exception: branch 01 (Nong
+            // Bua Lamphu) sees every branch's order data here, same as
+            // User/Branch Management. Kanban and Dashboard/Counter stay on
+            // the strict per-branch scope (see UserAccessControl::applyStrictBranchScope()).
             $query->where('branch_id', (int) $actor->branch_id);
         }
 
@@ -385,6 +413,10 @@ class OrderController extends Controller
                     ->where('order_status', OrderStatus::Completed)
                     ->whereMonth('order_date', now()->month);
 
+                // Orders page keeps the head-office exception: branch 01 (Nong
+                // Bua Lamphu) sees every branch's order data here, same as
+                // User/Branch Management. Kanban and Dashboard/Counter stay on
+                // the strict per-branch scope (see UserAccessControl::applyStrictBranchScope()).
                 if (! UserAccessControl::hasCrossBranchAccess($actor) && $actor->branch_id !== null) {
                     $branchId = (int) $actor->branch_id;
                     $inProduction->where('branch_id', $branchId);

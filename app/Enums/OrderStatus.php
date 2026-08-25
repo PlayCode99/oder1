@@ -17,6 +17,16 @@ enum OrderStatus: string
 
     public function canBeEdited(): bool
     {
-        return true;
+        return $this === self::Confirmed;
+    }
+
+    public function canEnterProduction(): bool
+    {
+        return in_array($this, [
+            self::Draft,
+            self::Designing,
+            self::WaitingCustomerConfirm,
+            self::Confirmed,
+        ], true);
     }
 }

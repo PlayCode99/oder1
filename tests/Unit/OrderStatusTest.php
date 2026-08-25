@@ -9,17 +9,31 @@ use Tests\TestCase;
 
 class OrderStatusTest extends TestCase
 {
-    public function test_all_order_statuses_are_editable(): void
+    public function test_only_confirmed_orders_are_editable(): void
     {
-        $this->assertTrue(OrderStatus::Draft->canBeEdited());
-        $this->assertTrue(OrderStatus::Designing->canBeEdited());
-        $this->assertTrue(OrderStatus::WaitingCustomerConfirm->canBeEdited());
+        $this->assertFalse(OrderStatus::Draft->canBeEdited());
+        $this->assertFalse(OrderStatus::Designing->canBeEdited());
+        $this->assertFalse(OrderStatus::WaitingCustomerConfirm->canBeEdited());
         $this->assertTrue(OrderStatus::Confirmed->canBeEdited());
-        $this->assertTrue(OrderStatus::InProduction->canBeEdited());
-        $this->assertTrue(OrderStatus::QcChecking->canBeEdited());
-        $this->assertTrue(OrderStatus::QcRejected->canBeEdited());
-        $this->assertTrue(OrderStatus::Shipping->canBeEdited());
-        $this->assertTrue(OrderStatus::Completed->canBeEdited());
-        $this->assertTrue(OrderStatus::Cancelled->canBeEdited());
+        $this->assertFalse(OrderStatus::InProduction->canBeEdited());
+        $this->assertFalse(OrderStatus::QcChecking->canBeEdited());
+        $this->assertFalse(OrderStatus::QcRejected->canBeEdited());
+        $this->assertFalse(OrderStatus::Shipping->canBeEdited());
+        $this->assertFalse(OrderStatus::Completed->canBeEdited());
+        $this->assertFalse(OrderStatus::Cancelled->canBeEdited());
+    }
+
+    public function test_only_pre_production_statuses_can_enter_production(): void
+    {
+        $this->assertTrue(OrderStatus::Draft->canEnterProduction());
+        $this->assertTrue(OrderStatus::Designing->canEnterProduction());
+        $this->assertTrue(OrderStatus::WaitingCustomerConfirm->canEnterProduction());
+        $this->assertTrue(OrderStatus::Confirmed->canEnterProduction());
+        $this->assertFalse(OrderStatus::InProduction->canEnterProduction());
+        $this->assertFalse(OrderStatus::QcChecking->canEnterProduction());
+        $this->assertFalse(OrderStatus::QcRejected->canEnterProduction());
+        $this->assertFalse(OrderStatus::Shipping->canEnterProduction());
+        $this->assertFalse(OrderStatus::Completed->canEnterProduction());
+        $this->assertFalse(OrderStatus::Cancelled->canEnterProduction());
     }
 }

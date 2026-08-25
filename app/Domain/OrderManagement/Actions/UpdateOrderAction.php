@@ -69,14 +69,11 @@ class UpdateOrderAction
                     ]));
                 }
 
-                $order->routings()->delete();
-                foreach (Arr::wrap($data['routings'] ?? []) as $stationName) {
-                    $order->routings()->create([
-                        'station_name' => (string) $stationName,
-                        'is_required' => true,
-                        'status' => 'pending',
-                    ]);
-                }
+                // Intentionally do not touch order_routings here. Production progress
+                // (station status, assigned users/teams, started_at/completed_at) is
+                // owned by AdvanceRoutingStationAction and must survive unrelated edits
+                // to the order (e.g. fixing a phone number or discount). Any incoming
+                // 'routings' field is accepted for validation compatibility but ignored.
 
                 $receipt = $order->receipts()->first();
                 $depositAmount = max(0.0, (float) ($data['deposit_amount'] ?? 0));
