@@ -26,7 +26,14 @@ class Order extends Model implements HasMedia
     /**
      * @var array<int, string>
      */
-    protected $appends = ['artwork_url', 'shirt_artwork_url', 'pants_artwork_url', 'reference_designs'];
+    protected $appends = [
+        'artwork_url',
+        'shirt_artwork_url',
+        'pants_artwork_url',
+        'shirt_artwork_urls',
+        'pants_artwork_urls',
+        'reference_designs',
+    ];
 
     protected function casts(): array
     {
@@ -90,8 +97,8 @@ class Order extends Model implements HasMedia
     public function registerMediaCollections(): void
     {
         $this->addMediaCollection('artwork')->singleFile();
-        $this->addMediaCollection('shirt_artwork')->singleFile();
-        $this->addMediaCollection('pants_artwork')->singleFile();
+        $this->addMediaCollection('shirt_artwork');
+        $this->addMediaCollection('pants_artwork');
         $this->addMediaCollection('reference_designs');
     }
 
@@ -114,6 +121,26 @@ class Order extends Model implements HasMedia
         $url = $this->getFirstMediaUrl('pants_artwork');
 
         return $url !== '' ? $url : null;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function getShirtArtworkUrlsAttribute(): array
+    {
+        return $this->getMedia('shirt_artwork')
+            ->map(fn (Media $media): string => $media->getUrl())
+            ->toArray();
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function getPantsArtworkUrlsAttribute(): array
+    {
+        return $this->getMedia('pants_artwork')
+            ->map(fn (Media $media): string => $media->getUrl())
+            ->toArray();
     }
 
     /**

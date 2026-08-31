@@ -400,7 +400,7 @@ class CreateOrderActionTest extends TestCase
         $this->assertNull($order->getFirstMedia('shirt_artwork'));
     }
 
-    public function test_it_keeps_artwork_channels_isolated_for_create_and_replace(): void
+    public function test_it_keeps_artwork_channels_isolated_for_create_and_appends_additional_shirt_and_pants_images(): void
     {
         Storage::fake('public');
 
@@ -436,15 +436,102 @@ class CreateOrderActionTest extends TestCase
         $this->assertStringEndsWith('.webp', (string) $order->getFirstMedia('shirt_artwork')?->file_name);
         $this->assertStringEndsWith('.webp', (string) $order->getFirstMedia('pants_artwork')?->file_name);
 
-        $order->addMedia(UploadedFile::fake()->image('shirt-replaced.jpg', 140, 140))->toMediaCollection('shirt_artwork');
+        // shirt_artwork/pants_artwork are no longer singleFile() collections, so adding
+        // another image appends a second item instead of replacing the first one.
+        $order->addMedia(UploadedFile::fake()->image('shirt-second.jpg', 140, 140))->toMediaCollection('shirt_artwork');
         $order->refresh();
 
-        $this->assertCount(1, $order->getMedia('shirt_artwork'));
+        $this->assertCount(2, $order->getMedia('shirt_artwork'));
         $this->assertCount(1, $order->getMedia('pants_artwork'));
         $this->assertCount(1, $order->getMedia('artwork'));
         $this->assertSame('general-source.jpg', $order->getFirstMedia('artwork')?->file_name);
-        $this->assertStringEndsWith('.jpg', (string) $order->getFirstMedia('shirt_artwork')?->file_name);
         $this->assertStringEndsWith('.webp', (string) $order->getFirstMedia('pants_artwork')?->file_name);
+
+        $shirtArtworkFileNames = $order->getMedia('shirt_artwork')
+            ->map(fn ($media) => $media->file_name)
+            ->all();
+
+        $this->assertCount(2, $shirtArtworkFileNames);
+        $this->assertTrue(collect($shirtArtworkFileNames)->contains(fn ($name) => str_ends_with((string) $name, '.webp')));
+        $this->assertTrue(collect($shirtArtworkFileNames)->contains('shirt-second.jpg'));
+        $this->assertSame(
+            $order->shirt_artwork_urls,
+            $order->getMedia('shirt_artwork')->map(fn ($media) => $media->getUrl())->toArray(),
+        );
+    }
+
+    public function test_it_stores_every_uploaded_shirt_and_pants_artwork_image_when_multiple_files_are_submitted(): void
+    {
+        Storage::fake('public');
+
+        $customer = Customer::create([
+            'customer_code' => 'CUS-ART-MULTI-0001',
+            'customer_name' => 'Artwork Multi Upload Customer',
+        ]);
+
+        $branch = Branch::create([
+            'branch_code' => 'BR-ART-MULTI-0001',
+            'branch_name' => 'Artwork Multi Upload Branch',
+        ]);
+
+        $creator = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        $order = (new CreateOrderAction())->execute([
+            ...$this->basePayload($customer->id, $branch->id, 'งานปัก'),
+            'shirt_artwork' => [
+                UploadedFile::fake()->image('shirt-1.jpg', 120, 120),
+                UploadedFile::fake()->image('shirt-2.jpg', 120, 120),
+                UploadedFile::fake()->image('shirt-3.jpg', 120, 120),
+            ],
+            'pants_artwork' => [
+                UploadedFile::fake()->image('pants-1.jpg', 120, 120),
+                UploadedFile::fake()->image('pants-2.jpg', 120, 120),
+            ],
+        ], $creator->id);
+
+        $order->refresh();
+
+        $this->assertCount(3, $order->getMedia('shirt_artwork'));
+        $this->assertCount(2, $order->getMedia('pants_artwork'));
+        $this->assertCount(3, $order->shirt_artwork_urls);
+        $this->assertCount(2, $order->pants_artwork_urls);
+
+        foreach ($order->getMedia('shirt_artwork') as $media) {
+            $this->assertStringEndsWith('.webp', (string) $media->file_name);
+        }
+
+        foreach ($order->getMedia('pants_artwork') as $media) {
+            $this->assertStringEndsWith('.webp', (string) $media->file_name);
+        }
+    }
+
+    public function test_it_preserves_the_exact_billing_time_instead_of_resetting_it_to_midnight(): void
+    {
+        $customer = Customer::create([
+            'customer_code' => 'CUS-BILL-TIME-1001',
+            'customer_name' => 'Billing Time Customer',
+        ]);
+
+        $branch = Branch::create([
+            'branch_code' => 'BR-BILL-TIME-1001',
+            'branch_name' => 'Billing Time Branch',
+        ]);
+
+        $creator = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        $payload = $this->basePayload($customer->id, $branch->id, 'งานสกรีน');
+        $payload['order_date'] = '2026-07-11 14:37:00';
+
+        $order = (new CreateOrderAction())->execute($payload, $creator->id);
+
+        $this->assertSame('2026-07-11 14:37:00', $order->order_date->format('Y-m-d H:i:s'));
+        $this->assertNotSame('00:00:00', $order->order_date->format('H:i:s'));
     }
 
     /**

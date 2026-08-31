@@ -1039,6 +1039,76 @@ describe('production board timeline sync', () => {
         expect(pantsArtwork.getAttribute('src')).toBe('https://example.com/pants-art.webp');
     });
 
+    it('counts every uploaded shirt and pants artwork image in the attached-images gallery', () => {
+        mockPage.props = {
+            productionPricingMap: {
+                '71': {
+                    components: [{ name: 'เย็บคอ', child_price: 10, adult_price: 20 }],
+                    pants_components: [{ name: 'เย็บขา', child_price: 5, adult_price: 15 }],
+                    child_unit_total: 0,
+                    adult_unit_total: 20,
+                    pants_child_unit_total: 0,
+                    pants_adult_unit_total: 15,
+                    child_total: 0,
+                    adult_total: 80,
+                    pants_child_total: 0,
+                    pants_adult_total: 45,
+                    grand_total: 125,
+                },
+            },
+        };
+
+        const order = {
+            id: 71,
+            order_code: 'ORD-071',
+            job_name: 'Artwork Gallery Count',
+            job_type: 'งานปัก',
+            order_status: 'in_production',
+            order_date: '2026-08-01',
+            due_date: '2026-08-05',
+            artwork_url: null,
+            shirt_artwork_urls: ['https://example.com/shirt-art-1.webp', 'https://example.com/shirt-art-2.webp'],
+            pants_artwork_urls: ['https://example.com/pants-art-1.webp'],
+            reference_designs: ['https://example.com/reference-1.webp'],
+            branch: { branch_name: 'สาขา 1' },
+            customer: { customer_name: 'ลูกค้า 71' },
+            creator_user: { name: 'ผู้สร้าง 71' },
+            items: [
+                { item_type: 'shirt', size_group: 'adults', size_label: 'L', quantity: 4 },
+                { item_type: 'pants', size_group: 'adults', size_label: 'L', quantity: 3 },
+            ],
+            receipts: [],
+            status_histories: [],
+            routings: [
+                {
+                    id: 7101,
+                    station_name: 'embroidery',
+                    is_required: true,
+                    status: 'pending',
+                    created_at: '2026-08-01T10:00:00.000000Z',
+                    updated_at: '2026-08-01T10:00:00.000000Z',
+                    started_at: null,
+                    completed_at: null,
+                },
+            ],
+        } as unknown as Order;
+
+        render(
+            <ProductionBoardPage
+                orders={[order]}
+                branches={[]}
+                initialDepartmentFilter="embroidery"
+                showDepartmentFilter={false}
+                hideBillingColumns={true}
+                pageTitle="ห้องปัก"
+            />,
+        );
+
+        fireEvent.click(screen.getByTitle('ดูรายละเอียดออเดอร์'));
+
+        expect(screen.getByText('รูปที่แนบทั้งหมด 4 รูป')).toBeInTheDocument();
+    });
+
     it('falls back shirt section artwork to general artwork when shirt artwork is missing', () => {
         mockPage.props = {
             productionPricingMap: {

@@ -1,7 +1,13 @@
 import { Head, router, usePage } from '@inertiajs/react';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import JsBarcode from 'jsbarcode';
-import { Calendar, CheckCircle2, Factory, FilePlus2, Package, Pencil, Printer, ScanFace, Search } from 'lucide-react';
+import { Calendar, CheckCircle2, ChevronLeft, ChevronRight, Clock, Copy, Factory, FilePlus2, MoreHorizontal, Package, Pencil, Printer, ScanFace, Search, Trash2 } from 'lucide-react';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import PendingInvitationsModal from '@/components/pending-invitations-modal';
 import { WorkReceiptBillHeader, WorkReceiptTopBar } from '@/components/domain/orders/WorkReceiptHeader';
@@ -9,10 +15,9 @@ import { DEFAULT_BRANCH_HEADER_COLOR, resolveBranchHeaderColor } from '@/lib/bra
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { DashboardInvitation } from '@/types';
-import { deriveFloorStats } from './counterStats';
 
 export interface FloorStats {
     print_room: { new_job: number; new_job_qty: number; printer_1: number; printer_2: number; printer_3: number; completed: number; completed_qty: number };
@@ -40,6 +45,7 @@ type DepartmentFilter = 'all' | 'design' | 'print_room' | 'cutting' | 'heat_pres
 export interface OrderTableRow {
     id: number;
     billing_date: string;
+    billing_time?: string;
     due_date: string;
     order_code: string;
     order_item_count?: number;
@@ -123,9 +129,20 @@ export interface OrderTableRow {
             total_price: number;
         }>;
         artwork_url: string | null;
+        shirt_artwork_urls: string[];
+        pants_artwork_urls: string[];
         reference_designs: string[];
     };
 }
+
+export type CounterPagination = {
+    current_page: number;
+    last_page: number;
+    per_page: number;
+    total: number;
+    from: number | null;
+    to: number | null;
+};
 
 type CounterProps = {
     pendingInvitations?: DashboardInvitation[];
@@ -133,6 +150,7 @@ type CounterProps = {
     floorStats: FloorStats;
     filters: CounterFilters;
     orders: OrderTableRow[];
+    pagination?: CounterPagination;
 };
 
 type DepartmentCardProps = {
@@ -464,161 +482,501 @@ export function canEditOrderStatus(row: { orderStatus?: string | null; hasProduc
     return normalizedOrderStatus === 'confirmed' && !row.hasProductionProgress;
 }
 
-function OrderVirtualizedGrid({
+function buildPageList(current: number, total: number): Array<number | 'ellipsis'> {
+    if (total <= 7) {
+        return Array.from({ length: total }, (_, index) => index + 1);
+    }
+
+    const pages: Array<number | 'ellipsis'> = [1];
+    const start = Math.max(2, current - 1);
+    const end = Math.min(total - 1, current + 1);
+
+    if (start > 2) {
+        pages.push('ellipsis');
+    }
+
+    for (let page = start; page <= end; page += 1) {
+        pages.push(page);
+    }
+
+    if (end < total - 1) {
+        pages.push('ellipsis');
+    }
+
+    pages.push(total);
+
+    return pages;
+}
+
+/**
+ * The counter row "Action" menu: edit, duplicate ("เปิดบิลอีกครั้ง") and delete.
+ *
+ * Edit and delete are gated separately — editing stops once production starts,
+ * while deleting is admin-only on top of that. Duplicating is always allowed:
+ * re-ordering a finished job is exactly when it is most useful.
+ */
+function OrderActionMenu({
+    row,
+    canEdit,
+    canDelete,
+    editTitle,
+    onDuplicate,
+    onDelete,
+    triggerClassName,
+    iconClassName,
+}: {
+    row: OrderTableRow;
+    canEdit: boolean;
+    canDelete: boolean;
+    editTitle: string;
+    onDuplicate: (row: OrderTableRow) => void;
+    onDelete: (row: OrderTableRow) => void;
+    triggerClassName: string;
+    iconClassName: string;
+}) {
+    return (
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Action"
+                    aria-label={`Action ออเดอร์ ${row.order_code}`}
+                    className={triggerClassName}
+                >
+                    <MoreHorizontal className={iconClassName} />
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem
+                    disabled={!canEdit}
+                    title={editTitle}
+                    onSelect={() => {
+                        if (canEdit) {
+                            router.visit(`/orders/${row.id}/edit`);
+                        }
+                    }}
+                >
+                    <Pencil className="size-4" />
+                    แก้ไข
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onDuplicate(row)}>
+                    <Copy className="size-4" />
+                    เปิดบิลอีกครั้ง
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                    disabled={!canDelete}
+                    variant="destructive"
+                    title={canDelete ? 'ลบออเดอร์' : 'ลบได้เฉพาะผู้ดูแลระบบ และเฉพาะงานที่ยังไม่เข้าไลน์ผลิต'}
+                    onSelect={() => {
+                        if (canDelete) {
+                            onDelete(row);
+                        }
+                    }}
+                >
+                    <Trash2 className="size-4" />
+                    ลบ
+                </DropdownMenuItem>
+            </DropdownMenuContent>
+        </DropdownMenu>
+    );
+}
+
+function OrdersTable({
     rows,
+    pagination,
+    onPageChange,
     onOpenDetail,
     onOpenTimeline,
     onOpenPdf,
+    isAdmin,
+    onDuplicate,
+    onDelete,
 }: {
     rows: OrderTableRow[];
+    pagination?: CounterPagination;
+    onPageChange: (page: number) => void;
     onOpenDetail: (row: OrderTableRow) => void;
     onOpenTimeline: (row: OrderTableRow) => void;
     onOpenPdf: (row: OrderTableRow) => void;
+    isAdmin: boolean;
+    onDuplicate: (row: OrderTableRow) => void;
+    onDelete: (row: OrderTableRow) => void;
 }) {
-    const parentRef = useRef<HTMLDivElement | null>(null);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
 
-    const virtualizer = useVirtualizer({
-        count: rows.length,
-        getScrollElement: () => parentRef.current,
-        estimateSize: () => 50,
-        overscan: 10,
-    });
+    // `rows` is already the current page — the server slices it. Everything below
+    // is just for rendering the footer and the page controls.
+    const pageRows = rows;
+    const currentPage = pagination?.current_page ?? 1;
+    const totalPages = Math.max(1, pagination?.last_page ?? 1);
+    const totalOrders = pagination?.total ?? rows.length;
+    const rangeStart = pagination?.from ?? (rows.length === 0 ? 0 : 1);
+    const rangeEnd = pagination?.to ?? rows.length;
 
-    const virtualRows = virtualizer.getVirtualItems();
+    // Bring the newly loaded page into view.
+    useEffect(() => {
+        scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    }, [currentPage]);
+
+    const goToPage = (nextPage: number) => {
+        const target = Math.min(Math.max(nextPage, 1), totalPages);
+
+        if (target === currentPage) {
+            return;
+        }
+
+        onPageChange(target);
+    };
+
+    const canEditRow = (row: OrderTableRow): boolean =>
+        canEditOrderStatus({
+            orderStatus: row.order_status,
+            hasProductionProgress: row.details?.routings?.some((routing) => routing.is_required && ['in_progress', 'completed'].includes(routing.status)) ?? false,
+        });
+
+    const editTitle = (canEdit: boolean): string => (canEdit ? 'แก้ไขออเดอร์' : 'แก้ไขได้เฉพาะออเดอร์สถานะยืนยันแล้ว');
+
+    // Mirrors OrderPolicy::delete — admin only, and only before the order has
+    // entered the production line. The server enforces this too; this only
+    // keeps the menu honest.
+    const canDeleteRow = (row: OrderTableRow): boolean =>
+        isAdmin &&
+        !(row.details?.routings?.some((routing) => routing.is_required && ['in_progress', 'completed'].includes(routing.status)) ?? false);
 
     return (
-        <div ref={parentRef} className="h-[calc(100vh-280px)] min-h-[550px] w-full overflow-y-auto overflow-x-hidden rounded-b-xl border border-slate-200 bg-white shadow-xs">
-            <table className="sticky top-0 z-10 w-full table-fixed divide-y divide-slate-200 bg-slate-50 text-left">
-                <thead>
-                    <tr className="text-xs font-bold text-slate-600">
-                        <th className="w-[7%] whitespace-nowrap px-2 py-2.5">วันที่เปิดบิล</th>
-                        <th className="w-[7%] whitespace-nowrap px-2 py-2.5">วันที่ส่งงาน</th>
-                        <th className="w-[11%] whitespace-nowrap px-2 py-2.5">เลขที่ออเดอร์</th>
-                        <th className="w-[8%] px-2 py-2.5">สาขา</th>
-                        <th className="w-[14%] px-2 py-2.5">ชื่อลูกค้า</th>
-                        <th className="w-[9%] px-2 py-2.5">ประเภทงาน</th>
-                        <th className="w-[6%] whitespace-nowrap px-2 py-2.5 text-right">จำนวนตัว</th>
-                        <th className="w-[11%] whitespace-nowrap px-2 py-2.5">สถานะงาน</th>
-                        <th className="w-[9%] whitespace-nowrap px-2 py-2.5">ใบจัดส่ง</th>
-                        <th className="w-[11%] whitespace-nowrap px-2 py-2.5">สถานะชำระเงิน</th>
-                        <th className="w-[8%] px-2 py-2.5">ผู้รับงาน</th>
-                        <th className="w-[7%] px-2 py-2.5 text-center">ไทม์ไลน์</th>
-                        <th className="w-[4%] px-2 py-2.5 text-center">จัดการ</th>
-                    </tr>
-                </thead>
-            </table>
+        <div className="rounded-b-xl border border-slate-200 bg-slate-100/60 md:bg-white">
+            <div
+                ref={scrollRef}
+                className="max-h-[calc(100dvh-330px)] w-full overflow-y-auto overflow-x-auto overscroll-contain md:max-h-[calc(100vh-260px)]"
+            >
+                <div className="md:min-w-[1120px]">
+                    <table className="sticky top-0 z-10 hidden w-full table-fixed border-b border-slate-200 bg-slate-50/95 text-left backdrop-blur-sm md:table">
+                        <thead>
+                            <tr className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                                <th className="w-[8%] whitespace-nowrap px-3 py-3">วันที่เปิดบิล</th>
+                                <th className="w-[7%] whitespace-nowrap px-3 py-3">วันที่ส่งงาน</th>
+                                <th className="w-[10%] whitespace-nowrap px-3 py-3">เลขที่ออเดอร์</th>
+                                <th className="w-[6%] px-3 py-3">สาขา</th>
+                                <th className="w-[13%] px-3 py-3">ชื่อลูกค้า</th>
+                                <th className="w-[10%] px-3 py-3">ประเภทงาน</th>
+                                <th className="w-[6%] whitespace-nowrap px-3 py-3 text-right">จำนวนตัว</th>
+                                <th className="w-[9%] whitespace-nowrap px-3 py-3">สถานะงาน</th>
+                                <th className="w-[7%] whitespace-nowrap px-3 py-3">ใบจัดส่ง</th>
+                                <th className="w-[8%] whitespace-nowrap px-3 py-3">สถานะชำระเงิน</th>
+                                <th className="w-[6%] px-3 py-3">ผู้รับงาน</th>
+                                <th className="w-[6%] px-3 py-3 text-center">ไทม์ไลน์</th>
+                                <th className="w-[4%] px-3 py-3 text-center">Action</th>
+                            </tr>
+                        </thead>
+                    </table>
 
-            {rows.length === 0 ? (
-                <div className="flex h-[500px] items-center justify-center text-sm text-slate-500">ไม่พบข้อมูลออเดอร์ตามเงื่อนไขที่เลือก</div>
-            ) : (
-                <div className="relative" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-                    {virtualRows.map((virtualRow) => {
-                        const row = rows[virtualRow.index];
-                        const canEdit = canEditOrderStatus({
-                            orderStatus: row.order_status,
-                            hasProductionProgress: row.details?.routings?.some((routing) => routing.is_required && ['in_progress', 'completed'].includes(routing.status)) ?? false,
-                        });
+                    {rows.length === 0 ? (
+                        <div className="flex h-[360px] flex-col items-center justify-center gap-2 px-6 text-center md:h-[420px]">
+                            <div className="flex size-12 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                                <Search className="size-5" />
+                            </div>
+                            <p className="text-sm font-semibold text-slate-600">ไม่พบข้อมูลออเดอร์</p>
+                            <p className="max-w-xs text-xs text-slate-400">ลองปรับช่วงวันที่ สาขา หรือคำค้นหาใหม่อีกครั้ง</p>
+                        </div>
+                    ) : (
+                        <div className="p-2 md:p-0">
+                            {pageRows.map((row, rowIndex) => {
+                                const canEdit = canEditRow(row);
 
-                        return (
-                            <table
-                                key={row.id}
-                                className="absolute left-0 top-0 w-full table-fixed divide-y divide-slate-200 text-left"
-                                style={{
-                                    transform: `translateY(${virtualRow.start}px)`,
-                                }}
-                            >
-                                <tbody>
-                                    <tr className="h-[50px] text-xs text-slate-700 transition-colors hover:bg-slate-100">
-                                        <td className="w-[7%] whitespace-nowrap px-2 py-2.5 text-xs text-slate-600">{formatTableDate(row.billing_date)}</td>
-                                        <td className="w-[7%] whitespace-nowrap px-2 py-2.5 text-xs font-semibold text-slate-800">{formatTableDate(row.due_date)}</td>
-                                        <td className="w-[11%] whitespace-nowrap px-2 py-2.5">
-                                            <button
-                                                type="button"
-                                                className="text-xs font-bold text-[#E21E26] underline-offset-2 hover:underline"
-                                                onClick={() => onOpenDetail(row)}
-                                                title="ดูรายละเอียดออเดอร์"
-                                            >
-                                                {row.order_code}
-                                            </button>
-                                        </td>
-                                        <td className="w-[8%] px-2 py-2.5 text-xs text-slate-600">
-                                            <span className="block truncate">{row.branch_name}</span>
-                                        </td>
-                                        <td className="w-[14%] px-2 py-2.5 text-xs" title={row.customer_name}>
-                                            <span className="block truncate font-medium text-slate-900">{row.customer_name}</span>
-                                            <span className="mt-0.5 block truncate text-[11px] text-slate-500">{row.details?.job_name || '-'}</span>
-                                        </td>
-                                        <td className="w-[9%] px-2 py-2.5 text-xs text-slate-600">
-                                            <span className="block truncate">{row.job_type}</span>
-                                        </td>
-                                        <td className="w-[6%] whitespace-nowrap px-2 py-2.5 text-right font-mono text-xs font-semibold text-slate-900">
-                                            {row.order_item_count ?? 0}
-                                        </td>
-                                        <td className="w-[11%] whitespace-nowrap px-2 py-2.5">
-                                            <Badge variant="outline" className={`${statusClass(row)} px-1.5 py-0.5 text-[11px]`}>
-                                                {statusLabel(row)}
-                                            </Badge>
-                                        </td>
-                                        <td className="w-[9%] whitespace-nowrap px-2 py-2.5">
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                className="h-7 border-red-200 bg-red-50 px-2 text-[11px] font-semibold text-red-700 transition-colors duration-150 ease-out hover:border-red-300 hover:bg-red-100 hover:text-red-800"
-                                                onClick={() => onOpenPdf(row)}
-                                            >
-                                                เปิด PDF
-                                            </Button>
-                                        </td>
-                                        <td className="w-[11%] whitespace-nowrap px-2 py-2.5">
-                                            <Badge variant="outline" className={`${paymentClass(row.payment_status)} px-1.5 py-0.5 text-[11px]`}>
-                                                {paymentLabel(row.payment_status)}
-                                            </Badge>
-                                        </td>
-                                        <td className="w-[8%] px-2 py-2.5 text-xs text-slate-500">
-                                            <span className="block truncate">{row.receiver_name}</span>
-                                        </td>
-                                        <td className="w-[7%] px-2 py-2.5 text-center">
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                className="h-7 border-[#174395] bg-[#174395] px-2 text-[11px] text-white transition-colors duration-150 ease-out hover:border-[#12367A] hover:bg-[#12367A] hover:text-white"
-                                                onClick={() => onOpenTimeline(row)}
-                                            >
-                                                ไทม์ไลน์
-                                            </Button>
-                                        </td>
-                                        <td className="w-[4%] px-2 py-2.5 text-center">
-                                            <Button
-                                                type="button"
-                                                size="icon"
-                                                variant="ghost"
-                                                disabled={!canEdit}
-                                                onClick={() => {
-                                                    if (canEdit) {
-                                                        router.visit(`/orders/${row.id}/edit`);
-                                                    }
-                                                }}
-                                                title={canEdit ? 'แก้ไขออเดอร์' : 'แก้ไขได้เฉพาะออเดอร์สถานะยืนยันแล้ว'}
-                                                className={`size-7 ${canEdit ? 'text-slate-500 hover:text-[#E21E26]' : 'cursor-not-allowed text-slate-300'}`}
-                                            >
-                                                <Pencil className="size-3.5" />
-                                            </Button>
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        );
-                    })}
+                                return (
+                                    <div key={row.id} className="mb-2 last:mb-0 md:mb-0">
+                                        {/* ---------- Mobile: one card per order ---------- */}
+                                        <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm md:hidden">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onOpenDetail(row)}
+                                                    className="flex min-w-0 flex-1 flex-col items-start text-left"
+                                                    title="ดูรายละเอียดออเดอร์"
+                                                >
+                                                    <span className="text-sm font-bold text-[#E21E26] underline-offset-2">{row.order_code}</span>
+                                                    <span className="mt-0.5 w-full truncate text-sm font-semibold text-slate-900">{row.customer_name}</span>
+                                                    <span className="w-full truncate text-xs text-slate-500">{row.details?.job_name || '-'}</span>
+                                                </button>
+                                                <div className="flex shrink-0 flex-col items-end gap-1">
+                                                    <Badge variant="outline" className={`${statusClass(row)} px-1.5 py-0.5 text-[10px]`}>
+                                                        {statusLabel(row)}
+                                                    </Badge>
+                                                    <Badge variant="outline" className={`${paymentClass(row.payment_status)} px-1.5 py-0.5 text-[10px]`}>
+                                                        {paymentLabel(row.payment_status)}
+                                                    </Badge>
+                                                </div>
+                                            </div>
+
+                                            <dl className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-2 rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">วันที่เปิดบิล</dt>
+                                                    <dd className="mt-0.5 flex flex-wrap items-center gap-x-1 font-semibold text-slate-700">
+                                                        <span>{formatTableDate(row.billing_date)}</span>
+                                                        {row.billing_time ? <span className="font-normal text-slate-400">{row.billing_time} น.</span> : null}
+                                                    </dd>
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">วันที่ส่งงาน</dt>
+                                                    <dd className="mt-0.5 font-semibold text-[#E21E26]">{formatTableDate(row.due_date)}</dd>
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">ประเภทงาน</dt>
+                                                    <dd className="mt-0.5 break-words font-medium text-slate-700">{row.job_type || '-'}</dd>
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">จำนวน</dt>
+                                                    <dd className="mt-0.5 font-medium text-slate-700">
+                                                        <span className="font-mono">{row.order_item_count ?? 0}</span> ตัว
+                                                    </dd>
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">สาขา</dt>
+                                                    <dd className="mt-0.5 truncate font-medium text-slate-700">{row.branch_name || '-'}</dd>
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <dt className="text-slate-400">ผู้รับงาน</dt>
+                                                    <dd className="mt-0.5 truncate font-medium text-slate-700">{row.receiver_name || '-'}</dd>
+                                                </div>
+                                            </dl>
+
+                                            <div className="mt-2.5 flex items-center gap-2">
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="h-9 flex-1 border-red-200 bg-red-50 text-[11px] font-semibold text-red-700 hover:border-red-300 hover:bg-red-100 hover:text-red-800"
+                                                    onClick={() => onOpenPdf(row)}
+                                                >
+                                                    <Printer className="mr-1 size-3.5" />
+                                                    เปิด PDF
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    className="h-9 flex-1 bg-[#174395] text-[11px] font-semibold text-white hover:bg-[#12367A]"
+                                                    onClick={() => onOpenTimeline(row)}
+                                                >
+                                                    ไทม์ไลน์
+                                                </Button>
+                                                <OrderActionMenu
+                                                    row={row}
+                                                    canEdit={canEdit}
+                                                    canDelete={canDeleteRow(row)}
+                                                    editTitle={editTitle(canEdit)}
+                                                    onDuplicate={onDuplicate}
+                                                    onDelete={onDelete}
+                                                    triggerClassName="size-9 shrink-0 border border-slate-200 text-slate-600 hover:text-[#E21E26]"
+                                                    iconClassName="size-4"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {/* ---------- Desktop: table row ---------- */}
+                                        <table
+                                            className={`hidden w-full table-fixed border-b border-slate-100 text-left transition-colors duration-150 hover:bg-sky-50/60 md:table ${
+                                                rowIndex % 2 === 1 ? 'bg-slate-50/40' : 'bg-white'
+                                            }`}
+                                        >
+                                            <tbody>
+                                                <tr className="h-14 text-xs text-slate-700">
+                                                    <td className="w-[8%] whitespace-nowrap px-3 py-2 align-middle">
+                                                        <div className="flex flex-col gap-0.5 leading-tight">
+                                                            <span className="font-semibold text-slate-700">{formatTableDate(row.billing_date)}</span>
+                                                            {row.billing_time ? (
+                                                                <span className="inline-flex w-fit items-center gap-1 text-[10px] font-medium text-slate-400">
+                                                                    <Clock className="size-2.5" />
+                                                                    {row.billing_time} น.
+                                                                </span>
+                                                            ) : null}
+                                                        </div>
+                                                    </td>
+                                                    <td className="w-[7%] whitespace-nowrap px-3 py-2 align-middle text-xs font-semibold text-[#E21E26]">
+                                                        {formatTableDate(row.due_date)}
+                                                    </td>
+                                                    <td className="w-[10%] whitespace-nowrap px-3 py-2 align-middle">
+                                                        <button
+                                                            type="button"
+                                                            className="text-xs font-bold text-[#174395] underline-offset-2 transition-colors hover:text-[#E21E26] hover:underline"
+                                                            onClick={() => onOpenDetail(row)}
+                                                            title="ดูรายละเอียดออเดอร์"
+                                                        >
+                                                            {row.order_code}
+                                                        </button>
+                                                    </td>
+                                                    <td className="w-[6%] px-3 py-2 align-middle text-xs text-slate-500">
+                                                        <span className="block truncate">{row.branch_name}</span>
+                                                    </td>
+                                                    <td className="w-[13%] px-3 py-2 align-middle text-xs" title={row.customer_name}>
+                                                        <span className="block truncate font-semibold text-slate-900">{row.customer_name}</span>
+                                                        <span className="mt-0.5 block truncate text-[11px] text-slate-400">{row.details?.job_name || '-'}</span>
+                                                    </td>
+                                                    <td className="w-[10%] px-3 py-2 align-middle text-xs text-slate-600" title={row.job_type}>
+                                                        <span className="block break-words whitespace-normal leading-tight">{row.job_type}</span>
+                                                    </td>
+                                                    <td className="w-[6%] whitespace-nowrap px-3 py-2 text-right align-middle">
+                                                        <span className="font-mono text-sm font-semibold text-slate-900">{row.order_item_count ?? 0}</span>
+                                                        <span className="ml-0.5 text-[10px] text-slate-400">ตัว</span>
+                                                    </td>
+                                                    <td className="w-[9%] whitespace-nowrap px-3 py-2 align-middle">
+                                                        <Badge variant="outline" className={`${statusClass(row)} px-1.5 py-0.5 text-[11px]`}>
+                                                            {statusLabel(row)}
+                                                        </Badge>
+                                                    </td>
+                                                    <td className="w-[7%] whitespace-nowrap px-3 py-2 align-middle">
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-7 border-red-200 bg-red-50 px-2 text-[11px] font-semibold text-red-700 transition-colors duration-150 ease-out hover:border-red-300 hover:bg-red-100 hover:text-red-800"
+                                                            onClick={() => onOpenPdf(row)}
+                                                        >
+                                                            เปิด PDF
+                                                        </Button>
+                                                    </td>
+                                                    <td className="w-[8%] whitespace-nowrap px-3 py-2 align-middle">
+                                                        <Badge variant="outline" className={`${paymentClass(row.payment_status)} px-1.5 py-0.5 text-[11px]`}>
+                                                            {paymentLabel(row.payment_status)}
+                                                        </Badge>
+                                                    </td>
+                                                    <td className="w-[6%] px-3 py-2 align-middle text-xs text-slate-500">
+                                                        <span className="block truncate">{row.receiver_name}</span>
+                                                    </td>
+                                                    <td className="w-[6%] px-3 py-2 text-center align-middle">
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-7 border-[#174395] bg-[#174395] px-2 text-[11px] text-white transition-colors duration-150 ease-out hover:border-[#12367A] hover:bg-[#12367A] hover:text-white"
+                                                            onClick={() => onOpenTimeline(row)}
+                                                        >
+                                                            ไทม์ไลน์
+                                                        </Button>
+                                                    </td>
+                                                    <td className="w-[4%] px-3 py-2 text-center align-middle">
+                                                        <OrderActionMenu
+                                                            row={row}
+                                                            canEdit={canEdit}
+                                                            canDelete={canDeleteRow(row)}
+                                                            editTitle={editTitle(canEdit)}
+                                                            onDuplicate={onDuplicate}
+                                                            onDelete={onDelete}
+                                                            triggerClassName="size-7 text-slate-500 hover:text-[#E21E26]"
+                                                            iconClassName="size-3.5"
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
+
+            {totalOrders > 0 ? (
+                <div className="flex flex-col gap-2 border-t border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-center text-[11px] text-slate-500 sm:text-left">
+                        แสดง <span className="font-semibold text-slate-700">{rangeStart}-{rangeEnd}</span> จากทั้งหมด{' '}
+                        <span className="font-semibold text-slate-700">{totalOrders}</span> ออเดอร์
+                    </p>
+
+                    <div className="flex items-center justify-center gap-1">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 px-2 text-[11px] font-semibold"
+                            disabled={currentPage === 1}
+                            onClick={() => goToPage(currentPage - 1)}
+                            title="หน้าก่อนหน้า"
+                        >
+                            <ChevronLeft className="size-3.5" />
+                            <span className="hidden sm:inline">ก่อนหน้า</span>
+                        </Button>
+
+                        {/* Compact page indicator on phones, full page list from sm up */}
+                        <span className="px-2 text-[11px] font-semibold text-slate-600 sm:hidden">
+                            หน้า {currentPage} / {totalPages}
+                        </span>
+
+                        <div className="hidden items-center gap-1 sm:flex">
+                            {buildPageList(currentPage, totalPages).map((item, index) =>
+                                item === 'ellipsis' ? (
+                                    <span key={`ellipsis-${index}`} className="px-1 text-[11px] text-slate-400">
+                                        …
+                                    </span>
+                                ) : (
+                                    <Button
+                                        key={item}
+                                        type="button"
+                                        variant={item === currentPage ? 'default' : 'outline'}
+                                        size="sm"
+                                        className={`h-8 min-w-8 px-2 text-[11px] font-semibold ${
+                                            item === currentPage ? 'bg-[#174395] text-white hover:bg-[#12367A]' : 'text-slate-600'
+                                        }`}
+                                        onClick={() => goToPage(item)}
+                                    >
+                                        {item}
+                                    </Button>
+                                ),
+                            )}
+                        </div>
+
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 px-2 text-[11px] font-semibold"
+                            disabled={currentPage === totalPages}
+                            onClick={() => goToPage(currentPage + 1)}
+                            title="หน้าถัดไป"
+                        >
+                            <span className="hidden sm:inline">ถัดไป</span>
+                            <ChevronRight className="size-3.5" />
+                        </Button>
+                    </div>
+                </div>
+            ) : null}
         </div>
     );
 }
 
-export default function Counter({ pendingInvitations = [], branches, floorStats: _floorStats, filters, orders }: CounterProps) {
-    const { currentTeam } = usePage<{ currentTeam?: { slug: string } | null }>().props;
+export default function Counter({ pendingInvitations = [], branches, floorStats, filters, orders, pagination }: CounterProps) {
+    const { currentTeam, auth } = usePage<{
+        currentTeam?: { slug: string } | null;
+        auth?: { user?: { role?: string | null } | null } | null;
+    }>().props;
+    const isAdmin = auth?.user?.role === 'admin';
+
+    // Delete is confirmed in a modal: it is the only destructive action on this
+    // page, and the row it came from has to survive the confirm step.
+    const [pendingDelete, setPendingDelete] = useState<OrderTableRow | null>(null);
+    const [deleting, setDeleting] = useState(false);
+
+    const handleDuplicateOrder = (row: OrderTableRow) => {
+        router.visit(`/orders/${row.id}/duplicate`);
+    };
+
+    const handleConfirmDelete = () => {
+        if (!pendingDelete) {
+            return;
+        }
+
+        setDeleting(true);
+        router.delete(`/orders/${pendingDelete.id}`, {
+            preserveScroll: true,
+            onFinish: () => {
+                setDeleting(false);
+                setPendingDelete(null);
+            },
+        });
+    };
     const [showInvitations, setShowInvitations] = useState(pendingInvitations.length > 0);
     const [branchId, setBranchId] = useState(formatInput(filters.branch_id) || 'all');
     const [billingDateFrom, setBillingDateFrom] = useState(formatInput(filters.billing_date_from));
@@ -662,9 +1020,10 @@ export default function Counter({ pendingInvitations = [], branches, floorStats:
         [branches],
     );
 
-    const derivedFloorStats = useMemo(() => deriveFloorStats(orders), [orders]);
+    // Computed on the server across every order matching the current filters —
+    // NOT just the page being shown (see DashboardController::buildCounterFloorStats).
+    const derivedFloorStats = floorStats;
 
-    void _floorStats;
 
     const departmentCards = useMemo(
         () => [
@@ -766,9 +1125,12 @@ export default function Counter({ pendingInvitations = [], branches, floorStats:
             return [] as string[];
         }
 
-        const list = [selectedOrder.details.artwork_url, ...selectedOrder.details.reference_designs].filter(
-            (url): url is string => Boolean(url),
-        );
+        const list = [
+            selectedOrder.details.artwork_url,
+            ...selectedOrder.details.shirt_artwork_urls,
+            ...selectedOrder.details.pants_artwork_urls,
+            ...selectedOrder.details.reference_designs,
+        ].filter((url): url is string => Boolean(url));
 
         return Array.from(new Set(list));
     }, [selectedOrder]);
@@ -845,32 +1207,49 @@ export default function Counter({ pendingInvitations = [], branches, floorStats:
         };
     }, []);
 
+    const counterUrl = currentTeam ? `/${currentTeam.slug}/counter` : '/counter';
+
+    const filterQuery = useMemo(
+        () => ({
+            branch_id: branchId === 'all' ? undefined : branchId,
+            billing_date_from: billingDateFrom || undefined,
+            billing_date_to: billingDateTo || undefined,
+            shipping_date_from: shippingDateFrom || undefined,
+            shipping_date_to: shippingDateTo || undefined,
+            search: search || undefined,
+            department: department === 'all' ? undefined : department,
+        }),
+        [branchId, billingDateFrom, billingDateTo, shippingDateFrom, shippingDateTo, search, department],
+    );
+
+    // Changing a filter changes the result set, so the page resets to 1 (no `page`
+    // param) and the floor cards have to be recomputed server-side as well.
     useEffect(() => {
         const timeoutId = window.setTimeout(() => {
-            const counterUrl = currentTeam ? `/${currentTeam.slug}/counter` : '/counter';
-
-            router.get(
-                counterUrl,
-                {
-                    branch_id: branchId === 'all' ? undefined : branchId,
-                    billing_date_from: billingDateFrom || undefined,
-                    billing_date_to: billingDateTo || undefined,
-                    shipping_date_from: shippingDateFrom || undefined,
-                    shipping_date_to: shippingDateTo || undefined,
-                    search: search || undefined,
-                    department: department === 'all' ? undefined : department,
-                },
-                {
-                    preserveState: true,
-                    preserveScroll: true,
-                    replace: true,
-                    only: ['orders', 'filters'],
-                },
-            );
+            router.get(counterUrl, filterQuery, {
+                preserveState: true,
+                preserveScroll: true,
+                replace: true,
+                only: ['orders', 'pagination', 'floorStats', 'filters'],
+            });
         }, 300);
 
         return () => window.clearTimeout(timeoutId);
-    }, [branchId, billingDateFrom, billingDateTo, shippingDateFrom, shippingDateTo, search, department, currentTeam]);
+    }, [counterUrl, filterQuery]);
+
+    // Paging keeps the same filters, so only the table payload has to come back —
+    // the floor cards summarise every matching order and do not change per page.
+    const handlePageChange = (page: number) => {
+        router.get(
+            counterUrl,
+            { ...filterQuery, page: page > 1 ? page : undefined },
+            {
+                preserveState: true,
+                preserveScroll: true,
+                only: ['orders', 'pagination'],
+            },
+        );
+    };
 
     const handlePrintDocument = (orderRow?: OrderTableRow | null) => {
         const sourceOrder = orderRow?.details ? orderRow : selectedOrder;
@@ -887,7 +1266,12 @@ export default function Counter({ pendingInvitations = [], branches, floorStats:
         const isIndividualPrint = sourcePersonalizationRows.length > 0;
         const billingDate = order.billing_date ?? '';
         const dueDate = order.due_date ?? '';
-        const printImages = Array.from(new Set([order.artwork_url, ...(order.reference_designs ?? [])].filter((url): url is string => Boolean(url))));
+        const printImages = Array.from(new Set([
+            order.artwork_url,
+            ...(order.shirt_artwork_urls ?? []),
+            ...(order.pants_artwork_urls ?? []),
+            ...(order.reference_designs ?? []),
+        ].filter((url): url is string => Boolean(url))));
         const customerName = order.customer.name || sourceOrder.customer_name || '-';
         const receiverName = sourceOrder.receiver_name || '-';
         const splitSpecRows = (rows: Array<{ label: string; value: string }>) => {
@@ -1387,15 +1771,45 @@ export default function Counter({ pendingInvitations = [], branches, floorStats:
                             </div>
                         </div>
 
-                        <OrderVirtualizedGrid
+                        <OrdersTable
                             rows={orders}
+                            pagination={pagination}
+                            onPageChange={handlePageChange}
                             onOpenDetail={setSelectedOrder}
                             onOpenTimeline={setTimelineOrder}
                             onOpenPdf={handlePrintDocument}
+                            isAdmin={isAdmin}
+                            onDuplicate={handleDuplicateOrder}
+                            onDelete={setPendingDelete}
                         />
                     </section>
                 </div>
             </div>
+
+            <Dialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>ยืนยันการลบออเดอร์</DialogTitle>
+                        <DialogDescription>
+                            ต้องการลบออเดอร์ <span className="font-semibold text-slate-900">{pendingDelete?.order_code}</span>{' '}
+                            ({pendingDelete?.customer_name}) ใช่หรือไม่? ออเดอร์จะถูกนำออกจากหน้าเคาน์เตอร์
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter className="gap-2 sm:gap-2">
+                        <Button type="button" variant="outline" onClick={() => setPendingDelete(null)} disabled={deleting}>
+                            ยกเลิก
+                        </Button>
+                        <Button
+                            type="button"
+                            className="bg-[#E21E26] text-white hover:bg-[#C4161C]"
+                            onClick={handleConfirmDelete}
+                            disabled={deleting}
+                        >
+                            {deleting ? 'กำลังลบ...' : 'ยืนยันการลบ'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
 
             {selectedOrder?.details ? (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onClick={() => setSelectedOrder(null)}>

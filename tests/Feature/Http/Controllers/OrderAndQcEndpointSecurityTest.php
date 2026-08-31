@@ -681,8 +681,15 @@ class OrderAndQcEndpointSecurityTest extends TestCase
 
         $payload = $this->buildForm1Payload($customer, $branch, 'ทดสอบผู้ใหญ่');
         $payload['design_artwork'] = UploadedFile::fake()->image('general-art.jpg', 140, 140);
-        $payload['shirt_artwork'] = UploadedFile::fake()->image('shirt-art.jpg', 140, 140);
-        $payload['pants_artwork'] = UploadedFile::fake()->image('pants-art.jpg', 140, 140);
+        // shirt_artwork/pants_artwork now accept multiple images per order, so the
+        // request field is an array of files rather than a single file.
+        $payload['shirt_artwork'] = [
+            UploadedFile::fake()->image('shirt-art-1.jpg', 140, 140),
+            UploadedFile::fake()->image('shirt-art-2.jpg', 140, 140),
+        ];
+        $payload['pants_artwork'] = [
+            UploadedFile::fake()->image('pants-art.jpg', 140, 140),
+        ];
 
         $response = $this->actingAs($salesUser)->post('/orders', $payload);
 
@@ -691,8 +698,8 @@ class OrderAndQcEndpointSecurityTest extends TestCase
         $order = Order::query()->latest('id')->firstOrFail();
 
         $this->assertNotNull($order->getFirstMedia('artwork'));
-        $this->assertNotNull($order->getFirstMedia('shirt_artwork'));
-        $this->assertNotNull($order->getFirstMedia('pants_artwork'));
+        $this->assertCount(2, $order->getMedia('shirt_artwork'));
+        $this->assertCount(1, $order->getMedia('pants_artwork'));
         $this->assertStringEndsWith('.webp', (string) $order->getFirstMedia('shirt_artwork')?->file_name);
         $this->assertStringEndsWith('.webp', (string) $order->getFirstMedia('pants_artwork')?->file_name);
     }
@@ -716,12 +723,14 @@ class OrderAndQcEndpointSecurityTest extends TestCase
         ]);
 
         $payload = $this->buildForm1Payload($customer, $branch, 'ทดสอบผู้ใหญ่');
-        $payload['shirt_artwork'] = UploadedFile::fake()->create('shirt-art.txt', 10, 'text/plain');
-        $payload['pants_artwork'] = UploadedFile::fake()->create('pants-art.png', 6001, 'image/png');
+        $payload['shirt_artwork'] = [UploadedFile::fake()->create('shirt-art.txt', 10, 'text/plain')];
+        $payload['pants_artwork'] = [UploadedFile::fake()->create('pants-art.png', 6001, 'image/png')];
 
         $response = $this->actingAs($salesUser)->post('/orders', $payload);
 
-        $response->assertSessionHasErrors(['shirt_artwork', 'pants_artwork']);
+        // shirt_artwork/pants_artwork are validated as arrays now, so each entry's
+        // error lands under its own indexed key (shirt_artwork.0, pants_artwork.0).
+        $response->assertSessionHasErrors(['shirt_artwork.0', 'pants_artwork.0']);
         $this->assertDatabaseCount('orders', 0);
     }
 

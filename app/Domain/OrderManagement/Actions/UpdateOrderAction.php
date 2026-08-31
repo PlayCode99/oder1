@@ -121,14 +121,19 @@ class UpdateOrderAction
                     $order->addMedia($data['design_artwork'])->toMediaCollection('artwork');
                 }
 
-                if (($data['shirt_artwork'] ?? null) instanceof \Illuminate\Http\UploadedFile) {
-                    $order->clearMediaCollection('shirt_artwork');
-                    $order->addMedia($data['shirt_artwork'])->toMediaCollection('shirt_artwork');
+                // Shirt/pants artwork now support multiple images per order.
+                // Like reference_designs below, saving only ever appends newly
+                // selected files here — it never removes previously saved ones.
+                foreach (Arr::wrap($data['shirt_artwork'] ?? []) as $shirtArtworkFile) {
+                    if ($shirtArtworkFile instanceof \Illuminate\Http\UploadedFile) {
+                        $order->addMedia($shirtArtworkFile)->toMediaCollection('shirt_artwork');
+                    }
                 }
 
-                if (($data['pants_artwork'] ?? null) instanceof \Illuminate\Http\UploadedFile) {
-                    $order->clearMediaCollection('pants_artwork');
-                    $order->addMedia($data['pants_artwork'])->toMediaCollection('pants_artwork');
+                foreach (Arr::wrap($data['pants_artwork'] ?? []) as $pantsArtworkFile) {
+                    if ($pantsArtworkFile instanceof \Illuminate\Http\UploadedFile) {
+                        $order->addMedia($pantsArtworkFile)->toMediaCollection('pants_artwork');
+                    }
                 }
 
                 foreach (Arr::wrap($data['reference_designs'] ?? []) as $referenceDesign) {

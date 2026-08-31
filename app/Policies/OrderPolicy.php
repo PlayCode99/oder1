@@ -36,7 +36,27 @@ class OrderPolicy
             return false;
         }
 
-        return ! $order->routings()
+        return ! $this->hasProductionProgress($order);
+    }
+
+    /**
+     * Deleting is deliberately stricter than editing: only an admin may do it,
+     * and only while the order has not entered the production line. Once any
+     * required routing is in progress or completed, the shop floor has already
+     * acted on the order and removing it would orphan that work.
+     */
+    public function delete(User $user, Order $order): bool
+    {
+        if ($user->role !== UserRole::Admin) {
+            return false;
+        }
+
+        return ! $this->hasProductionProgress($order);
+    }
+
+    private function hasProductionProgress(Order $order): bool
+    {
+        return $order->routings()
             ->where('is_required', true)
             ->whereIn('status', [
                 RoutingStatus::InProgress->value,

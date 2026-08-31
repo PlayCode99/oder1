@@ -20,6 +20,113 @@ describe('buildEditInitialFormData', () => {
         expect(result.branch_id).toBe('2');
     });
 
+    it('defaults a new order billing_time to the current wall-clock time', () => {
+        const result = buildEditInitialFormData(null, {
+            resolvedBranches: [{ id: 1, name: 'Branch 01', code: '01', phone: null }],
+            defaultBranchId: 1,
+            resolvedJobTypes: [{ id: 1, name: 'uniform' }],
+            resolvedShirtTypes: [{ id: 1, name: 'Shirt' }],
+            resolvedPantsTypes: [{ id: 1, name: 'Pants' }],
+            resolvedKidsSizes: ['S'],
+            resolvedAdultSizes: ['M'],
+        });
+
+        expect(result.billing_time).toMatch(/^\d{2}:\d{2}$/);
+    });
+
+    it('carries over the saved billing_time when editing an existing order', () => {
+        const result = buildEditInitialFormData(
+            {
+                customer_id: 1,
+                branch_id: 2,
+                customer_name: 'Customer A',
+                customer_phone: '0812345678',
+                contact_detail: 'Line',
+                job_name: 'Order A',
+                job_type: 'uniform',
+                billing_date: '2026-08-01',
+                billing_time: '13:45',
+                due_date: '2026-08-05',
+                delivery_method: 'shipping',
+                shipping_address: 'Bangkok',
+                discount_percent: 10,
+                deposit_amount: 300,
+                payment_method: 'cash',
+                artwork_url: null,
+                shirt_artwork_urls: [],
+                pants_artwork_urls: [],
+                reference_designs: [],
+                items: [],
+                specification: {
+                    pattern_id: 1,
+                    fabric_id: 2,
+                    neck_style_id: 3,
+                    screen_print_detail: JSON.stringify({
+                        shirt_specs: { pattern_id: '1', fabric_id: '2', neck_style_id: '3', screen_text: 'Hello' },
+                        pants_specs: {},
+                        personalization_rows: [],
+                    }),
+                },
+            },
+            {
+                resolvedBranches: [{ id: 2, name: 'Branch 2', code: '02', phone: null }],
+                resolvedJobTypes: [{ id: 1, name: 'uniform' }],
+                resolvedShirtTypes: [{ id: 1, name: 'Shirt' }],
+                resolvedPantsTypes: [{ id: 1, name: 'Pants' }],
+                resolvedKidsSizes: ['S', 'M'],
+                resolvedAdultSizes: ['S', 'M', 'L'],
+            },
+        );
+
+        expect(result.billing_time).toBe('13:45');
+    });
+
+    it('falls back to the current wall-clock time when an existing order has no saved billing_time', () => {
+        const result = buildEditInitialFormData(
+            {
+                customer_id: 1,
+                branch_id: 2,
+                customer_name: 'Customer A',
+                customer_phone: '0812345678',
+                contact_detail: 'Line',
+                job_name: 'Order A',
+                job_type: 'uniform',
+                billing_date: '2026-08-01',
+                due_date: '2026-08-05',
+                delivery_method: 'shipping',
+                shipping_address: 'Bangkok',
+                discount_percent: 10,
+                deposit_amount: 300,
+                payment_method: 'cash',
+                artwork_url: null,
+                shirt_artwork_urls: [],
+                pants_artwork_urls: [],
+                reference_designs: [],
+                items: [],
+                specification: {
+                    pattern_id: 1,
+                    fabric_id: 2,
+                    neck_style_id: 3,
+                    screen_print_detail: JSON.stringify({
+                        shirt_specs: { pattern_id: '1', fabric_id: '2', neck_style_id: '3', screen_text: 'Hello' },
+                        pants_specs: {},
+                        personalization_rows: [],
+                    }),
+                },
+            },
+            {
+                resolvedBranches: [{ id: 2, name: 'Branch 2', code: '02', phone: null }],
+                resolvedJobTypes: [{ id: 1, name: 'uniform' }],
+                resolvedShirtTypes: [{ id: 1, name: 'Shirt' }],
+                resolvedPantsTypes: [{ id: 1, name: 'Pants' }],
+                resolvedKidsSizes: ['S', 'M'],
+                resolvedAdultSizes: ['S', 'M', 'L'],
+            },
+        );
+
+        expect(result.billing_time).toMatch(/^\d{2}:\d{2}$/);
+    });
+
     it('reconstructs the saved groups to their own size tables and keeps artwork previews', () => {
         const result = buildEditInitialFormData(
             {
@@ -38,8 +145,8 @@ describe('buildEditInitialFormData', () => {
                 deposit_amount: 300,
                 payment_method: 'cash',
                 artwork_url: 'https://cdn.example.com/general.png',
-                shirt_artwork_url: 'https://cdn.example.com/shirt.png',
-                pants_artwork_url: 'https://cdn.example.com/pants.png',
+                shirt_artwork_urls: ['https://cdn.example.com/shirt.png'],
+                pants_artwork_urls: ['https://cdn.example.com/pants.png'],
                 reference_designs: ['https://cdn.example.com/ref-1.png'],
                 items: [
                     { item_type: 'garment', size_group: 'kids', size_label: 'S', quantity: 2, unit_price: 200, total_price: 400 },
@@ -103,8 +210,8 @@ describe('buildEditInitialFormData', () => {
                 deposit_amount: 300,
                 payment_method: 'cash',
                 artwork_url: null,
-                shirt_artwork_url: null,
-                pants_artwork_url: null,
+                shirt_artwork_urls: [],
+                pants_artwork_urls: [],
                 reference_designs: [],
                 items: [],
                 specification: {

@@ -107,22 +107,20 @@ class OrderController extends Controller
             'sublimations' => [['id' => 1, 'name' => 'เต็มตัว'], ['id' => 2, 'name' => 'เฉพาะจุด']],
         ];
 
-        $colors = $this->optionsFromStorageKey('jssport.shirt-colors', $fallback['fabric_colors']);
-
         return [
             'patterns' => $this->optionsFromStorageKey('jssport.shirt-patterns', $fallback['patterns']),
             'fabrics' => $this->optionsFromStorageKey('jssport.shirt-fabrics', $fallback['fabrics']),
-            'fabric_colors' => $colors,
+            'fabric_colors' => $this->optionsFromStorageKey('jssport.shirt-fabric-colors', $fallback['fabric_colors']),
             'neck_styles' => $this->optionsFromStorageKey('jssport.shirt-collars', $fallback['neck_styles']),
-            'neck_colors' => $colors,
+            'neck_colors' => $this->optionsFromStorageKey('jssport.shirt-neck-colors', $fallback['neck_colors']),
             'collars' => $this->optionsFromStorageKey('jssport.shirt-collars', $fallback['collars']),
             'placket_styles' => $this->optionsFromStorageKey('jssport.shirt-plackets', $fallback['placket_styles']),
-            'placket_outer_colors' => $colors,
-            'placket_inner_colors' => $colors,
+            'placket_outer_colors' => $this->optionsFromStorageKey('jssport.shirt-placket-outer-colors', $fallback['placket_outer_colors']),
+            'placket_inner_colors' => $this->optionsFromStorageKey('jssport.shirt-placket-inner-colors', $fallback['placket_inner_colors']),
             'sleeve_cuffs' => $this->optionsFromStorageKey('jssport.shirt-cuffs', $fallback['sleeve_cuffs']),
             'panel_styles' => $this->optionsFromStorageKey('jssport.shirt-panels', $fallback['panel_styles']),
-            'screen_colors' => $colors,
-            'embroidery_colors' => $colors,
+            'screen_colors' => $this->optionsFromStorageKey('jssport.shirt-screen-colors', $fallback['screen_colors']),
+            'embroidery_colors' => $this->optionsFromStorageKey('jssport.shirt-embroidery-colors', $fallback['embroidery_colors']),
             'sublimations' => $this->optionsFromStorageKey('jssport.shirt-sublimation', $fallback['sublimations']),
         ];
     }
@@ -186,11 +184,36 @@ class OrderController extends Controller
     }
 
     /**
+     * "เปิดบิลอีกครั้ง" — open the create form pre-filled from an existing order.
+     *
+     * This renders the very same form as create(), so every field stays
+     * editable; the payload simply carries no id, which is what makes the
+     * form POST to store() and run a fresh order_code. The source id rides
+     * along as duplicate_from_id so store() can copy the artwork media over.
+     */
+    public function duplicate(Request $request, Order $order): Response
+    {
+        $this->authorize('create', Order::class);
+
+        return $this->renderOrderForm($request, $order, duplicateFrom: $order);
+    }
+
+    public function destroy(Request $request, Order $order): RedirectResponse
+    {
+        $this->authorize('delete', $order);
+
+        $order->delete();
+
+        return back()->with('success', "ลบออเดอร์ {$order->order_code} เรียบร้อยแล้ว");
+    }
+
+    /**
      * @return Response
      */
-    private function renderOrderForm(Request $request, ?Order $order): Response
+    private function renderOrderForm(Request $request, ?Order $order, ?Order $duplicateFrom = null): Response
     {
         $actor = $request->user();
+        $isDuplicate = $duplicateFrom !== null;
 
         $customers = Customer::query()
             ->select(['id', 'customer_code', 'customer_name', 'phone', 'line_fb'])
@@ -251,26 +274,41 @@ class OrderController extends Controller
                 : null;
 
             $orderPayload = [
-                'id' => $order->id,
-                'order_code' => $order->order_code,
+                // A duplicate carries no identity: a null id is what tells the
+                // form it is creating rather than editing, so it POSTs to
+                // store() and receives a freshly generated order_code.
+                'id' => $isDuplicate ? null : $order->id,
+                'order_code' => $isDuplicate ? null : $order->order_code,
+                'duplicate_from_id' => $isDuplicate ? $order->id : null,
                 'customer_id' => $order->customer_id,
                 'branch_id' => $order->branch_id,
                 'customer_name' => $order->customer?->customer_name ?? '',
                 'customer_phone' => $order->customer?->phone ?? '',
-                'contact_detail' => $order->receipts->sortByDesc('payment_date')->first()?->note ?? '',
+                'contact_detail' => $isDuplicate ? '' : ($order->receipts->sortByDesc('payment_date')->first()?->note ?? ''),
                 'job_name' => $order->job_name,
                 'job_type' => $order->job_type,
-                'billing_date' => $order->order_date?->format('Y-m-d') ?? '',
-                'due_date' => $order->due_date?->format('Y-m-d') ?? '',
+                'billing_date' => $isDuplicate
+                    ? Carbon::now()->format('Y-m-d')
+                    : ($order->order_date?->format('Y-m-d') ?? ''),
+                'billing_time' => $isDuplicate
+                    ? Carbon::now()->format('H:i')
+                    : ($order->order_date?->format('H:i') ?? ''),
+                // The original's delivery date is almost always in the past by the
+                // time a job is re-ordered, and silently reusing it would schedule
+                // the new bill for a date that has already gone. Left empty so the
+                // form makes the user pick one (it is required there).
+                'due_date' => $isDuplicate ? '' : ($order->due_date?->format('Y-m-d') ?? ''),
                 'delivery_method' => $order->delivery_method ?? 'pickup',
                 'shipping_address' => $order->shipping_address ?? '',
                 'discount_percent' => (string) ($order->discount_percent ?? 0),
-                'deposit_amount' => (float) $order->receipts->sum('amount_paid'),
-                'payment_method' => $order->receipts->sortByDesc('payment_date')->first()?->payment_method ?? 'cash',
-                'order_status' => $order->order_status?->value ?? null,
+                // Payments belong to the original bill only - carrying them over
+                // would fabricate a receipt for money nobody has paid yet.
+                'deposit_amount' => $isDuplicate ? 0.0 : (float) $order->receipts->sum('amount_paid'),
+                'payment_method' => $isDuplicate ? 'cash' : ($order->receipts->sortByDesc('payment_date')->first()?->payment_method ?? 'cash'),
+                'order_status' => $isDuplicate ? null : ($order->order_status?->value ?? null),
                 'artwork_url' => $order->artwork_url,
-                'shirt_artwork_url' => $order->shirt_artwork_url,
-                'pants_artwork_url' => $order->pants_artwork_url,
+                'shirt_artwork_urls' => $order->shirt_artwork_urls,
+                'pants_artwork_urls' => $order->pants_artwork_urls,
                 'reference_designs' => $order->reference_designs,
                 'items' => $order->items
                     ->map(fn ($item): array => [
@@ -295,7 +333,10 @@ class OrderController extends Controller
 
         $deliveryDateLoads = Order::query()
             ->whereNotIn('order_status', [OrderStatus::Cancelled, OrderStatus::Completed])
-            ->when($order !== null, fn ($query) => $query->whereKeyNot($order->id))
+            // An order being edited is excluded so it does not count its own load
+            // twice. A duplicate is a brand-new order, so the source order's load
+            // still stands and must stay in the totals.
+            ->when($order !== null && ! $isDuplicate, fn ($query) => $query->whereKeyNot($order->id))
             ->whereDate('due_date', '>=', today())
             ->join('order_items', 'orders.id', '=', 'order_items.order_id')
             ->selectRaw('DATE(orders.due_date) as due_date, SUM(order_items.quantity) as total_quantity')
@@ -320,7 +361,7 @@ class OrderController extends Controller
             'pantsTypes' => $this->garmentTypeOptions('PANTS'),
             'kidsSizes' => $this->sizeOptionsFromStorageKey('jssport.size-kids'),
             'adultSizes' => $this->sizeOptionsFromStorageKey('jssport.size-adults'),
-            'defaultBranchId' => $order === null ? $actor->branch_id : null,
+            'defaultBranchId' => ($order === null || $isDuplicate) ? $actor->branch_id : null,
             'dailyProductionCapacity' => ProductionDailySetting::query()->first()?->daily_capacity ?? 200,
             'deliveryDateLoads' => $deliveryDateLoads,
             'order' => $orderPayload,

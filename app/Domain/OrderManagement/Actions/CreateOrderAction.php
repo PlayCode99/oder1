@@ -30,8 +30,8 @@ class CreateOrderAction
                 $this->logCreateStage('start', $creatorUserId, $data, [
                     'has_specification' => is_array($data['specification'] ?? null),
                     'design_artwork' => ($data['design_artwork'] ?? null) instanceof UploadedFile,
-                    'shirt_artwork' => ($data['shirt_artwork'] ?? null) instanceof UploadedFile,
-                    'pants_artwork' => ($data['pants_artwork'] ?? null) instanceof UploadedFile,
+                    'shirt_artwork_count' => count(Arr::wrap($data['shirt_artwork'] ?? [])),
+                    'pants_artwork_count' => count(Arr::wrap($data['pants_artwork'] ?? [])),
                     'reference_designs_count' => count(Arr::wrap($data['reference_designs'] ?? [])),
                     'payment_method' => isset($data['payment_method']) ? (string) $data['payment_method'] : null,
                     'delivery_method' => isset($data['delivery_method']) ? (string) $data['delivery_method'] : null,
@@ -128,14 +128,24 @@ class CreateOrderAction
                     $order->addMedia($data['design_artwork'])->toMediaCollection('artwork');
                 }
 
-                $this->storeArtworkAsWebpIfPresent($order, $data['shirt_artwork'] ?? null, 'shirt_artwork');
-                $this->storeArtworkAsWebpIfPresent($order, $data['pants_artwork'] ?? null, 'pants_artwork');
+                foreach (Arr::wrap($data['shirt_artwork'] ?? []) as $shirtArtworkFile) {
+                    $this->storeArtworkAsWebpIfPresent($order, $shirtArtworkFile, 'shirt_artwork');
+                }
+
+                foreach (Arr::wrap($data['pants_artwork'] ?? []) as $pantsArtworkFile) {
+                    $this->storeArtworkAsWebpIfPresent($order, $pantsArtworkFile, 'pants_artwork');
+                }
 
                 foreach (Arr::wrap($data['reference_designs'] ?? []) as $referenceDesign) {
                     if ($referenceDesign instanceof UploadedFile) {
                         $order->addMedia($referenceDesign)->toMediaCollection('reference_designs');
                     }
                 }
+
+                // "เปิดบิลอีกครั้ง": the browser can only re-send files the user
+                // picked just now, so the source order's already-saved artwork is
+                // copied here instead. Copies are added on top of any new upload.
+                $this->copyArtworkFromSourceOrder($order, $data['duplicate_from_id'] ?? null);
 
                 $stationNames = $this->resolveRoutingStations($data);
 
@@ -199,6 +209,30 @@ class CreateOrderAction
             ]);
 
             throw new RuntimeException('Failed to create order.', previous: $exception);
+        }
+    }
+
+    /**
+     * Copies every artwork collection from the order being duplicated onto the
+     * newly created order. Media are copied, never moved, so the original bill
+     * keeps its own images intact.
+     */
+    private function copyArtworkFromSourceOrder(Order $order, mixed $sourceOrderId): void
+    {
+        if (! is_numeric($sourceOrderId)) {
+            return;
+        }
+
+        $source = Order::query()->find((int) $sourceOrderId);
+
+        if (! $source instanceof Order) {
+            return;
+        }
+
+        foreach (['artwork', 'shirt_artwork', 'pants_artwork', 'reference_designs'] as $collection) {
+            foreach ($source->getMedia($collection) as $media) {
+                $media->copy($order, $collection);
+            }
         }
     }
 

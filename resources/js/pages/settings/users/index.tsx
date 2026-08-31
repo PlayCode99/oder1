@@ -91,13 +91,12 @@ export default function UserManagementPage({ auth, users, branches, roles, filte
     };
 
     const openCreateDialogWithLatestBranches = () => {
+        openCreate();
+        setIsCreateOpen(true);
+
         router.reload({
             only: ['branches'],
             preserveScroll: true,
-            onSuccess: () => {
-                openCreate();
-                setIsCreateOpen(true);
-            },
         });
     };
 

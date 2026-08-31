@@ -151,4 +151,50 @@ final class UserAccessControl
             'branch_name' => (string) $branch->branch_name,
         ])->values()->all();
     }
+
+    /**
+     * Strict, always-per-branch scope for order/production data (Orders,
+     * production Kanban, Dashboard/Counter). Unlike applyBranchScope(), this
+     * never grants cross-branch visibility — not even to the branch
+     * configured as head office via branch_cross_view_code. User Management
+     * and Branch Management intentionally keep that head-office exception
+     * (see hasCrossBranchAccess()); order/production data does not.
+     */
+    public static function applyStrictBranchScope(Builder $query, User $user, string $column = 'branch_id'): void
+    {
+        if ($user->branch_id === null) {
+            $query->whereRaw('1 = 0');
+
+            return;
+        }
+
+        $query->where($column, (int) $user->branch_id);
+    }
+
+    /**
+     * Strict counterpart to canAccessBranch(): true only when the target
+     * branch is the user's own branch. Used to validate a branch_id filter
+     * on order/production data so a head-office account cannot bypass
+     * applyStrictBranchScope() by passing another branch's id explicitly.
+     */
+    public static function canAccessBranchStrict(User $user, int $targetBranchId): bool
+    {
+        return $user->branch_id !== null && (int) $user->branch_id === $targetBranchId;
+    }
+
+    /**
+     * Strict counterpart to branchOptionsVisibleTo(): only the user's own
+     * branch, regardless of head-office status.
+     */
+    public static function strictBranchOptionsVisibleTo(User $user): array
+    {
+        $query = Branch::query()->select(['id', 'branch_code', 'branch_name'])->orderBy('branch_name');
+        self::applyStrictBranchScope($query, $user, 'id');
+
+        return $query->get()->map(fn (Branch $branch): array => [
+            'id' => (int) $branch->id,
+            'branch_code' => (string) $branch->branch_code,
+            'branch_name' => (string) $branch->branch_name,
+        ])->values()->all();
+    }
 }

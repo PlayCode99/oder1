@@ -36,7 +36,9 @@ Route::middleware(['auth'])->group(function () {
     Route::delete('invitations/{invitation}', [TeamInvitationController::class, 'decline'])->name('invitations.decline');
     Route::get('orders/create', [OrderController::class, 'create'])->name('orders.create');
     Route::get('orders/{order}/edit', [OrderController::class, 'edit'])->name('orders.edit');
+    Route::get('orders/{order}/duplicate', [OrderController::class, 'duplicate'])->name('orders.duplicate');
     Route::put('orders/{order}', [OrderController::class, 'update'])->name('orders.update');
+    Route::delete('orders/{order}', [OrderController::class, 'destroy'])->name('orders.destroy');
     Route::get('orders', [OrderController::class, 'index'])->name('orders.index');
     Route::post('orders', [OrderController::class, 'store'])->name('orders.store');
     Route::get('production/kanban', [ProductionKanbanController::class, 'index'])->name('production.kanban');
@@ -109,6 +111,8 @@ Route::middleware(['auth'])->group(function () {
         ->name('settings.data.shirts.catalog');
     Route::post('settings/data/catalog-items/sync', [ShirtCatalogController::class, 'syncCatalogItems'])
         ->name('settings.data.catalog-items.sync');
+    Route::post('settings/data/catalog-items/quick-add', [ShirtCatalogController::class, 'quickAddCatalogItem'])
+        ->name('settings.data.catalog-items.quick-add');
     Route::get('settings/data/pants', [ShirtCatalogController::class, 'pantsIndex'])->name('settings.data.pants.index');
     Route::get('settings/data/pants/catalog/{catalog}', [ShirtCatalogController::class, 'showPantsCatalog'])
         ->name('settings.data.pants.catalog');

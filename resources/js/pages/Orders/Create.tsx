@@ -26,6 +26,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useWebpCompress } from '@/hooks/useWebpCompress';
 import { DeliveryDatePicker, type DeliveryDateLoad } from '@/components/domain/orders/DeliveryDatePicker';
+import { MasterDataComboBox } from '@/components/domain/orders/MasterDataComboBox';
 
 type DeliveryMethod = 'pickup' | 'shipping' | 'onsite';
 type PaymentMethod = 'cash' | 'transfer';
@@ -56,6 +57,20 @@ type BranchOption = {
 };
 
 type CatalogMap = Record<string, OptionItem[]>;
+
+// The 9 color fields (6 shirt + 3 pants, sharing storage with their shirt
+// counterparts) that support typing a free-text value or adding it as
+// master data inline, instead of only picking from a fixed dropdown.
+// Keyed by the shirtSelectFields/pantsSelectFields "source" name so the
+// render loop can look up the right catalog to write new master rows into.
+const COLOR_FIELD_STORAGE_KEYS: Partial<Record<keyof CatalogMap, string>> = {
+    fabric_colors: 'jssport.shirt-fabric-colors',
+    neck_colors: 'jssport.shirt-neck-colors',
+    placket_outer_colors: 'jssport.shirt-placket-outer-colors',
+    placket_inner_colors: 'jssport.shirt-placket-inner-colors',
+    screen_colors: 'jssport.shirt-screen-colors',
+    embroidery_colors: 'jssport.shirt-embroidery-colors',
+};
 
 type ShirtSpecsForm = {
     shirt_type_id: string;
@@ -142,6 +157,7 @@ type OrderCreateFormData = {
     job_type_id: string;
     job_name: string;
     billing_date: string;
+    billing_time: string;
     due_date: string;
     delivery_method: DeliveryMethod;
     shipping_address: string;
@@ -151,8 +167,8 @@ type OrderCreateFormData = {
     payment_status: PaymentStatus;
     artwork_status: ArtworkStatus;
     artwork_files: File[];
-    shirt_artwork_file: File | null;
-    pants_artwork_file: File | null;
+    shirt_artwork_files: File[];
+    pants_artwork_files: File[];
     transfer_slip_file: File | null;
     shirt_specs: ShirtSpecsForm;
     pants_specs: PantsSpecsForm;
@@ -164,6 +180,8 @@ type OrderCreateFormData = {
 type EditOrderPayload = {
     id?: number;
     order_code?: string | null;
+    /** Set when the form was opened via "เปิดบิลอีกครั้ง" — the id of the source order. */
+    duplicate_from_id?: number | null;
     customer_id?: number | null;
     branch_id?: number | null;
     customer_name?: string | null;
@@ -172,6 +190,7 @@ type EditOrderPayload = {
     job_name?: string | null;
     job_type?: string | null;
     billing_date?: string | null;
+    billing_time?: string | null;
     due_date?: string | null;
     delivery_method?: string | null;
     shipping_address?: string | null;
@@ -180,8 +199,8 @@ type EditOrderPayload = {
     payment_method?: string | null;
     order_status?: string | null;
     artwork_url?: string | null;
-    shirt_artwork_url?: string | null;
-    pants_artwork_url?: string | null;
+    shirt_artwork_urls?: string[] | null;
+    pants_artwork_urls?: string[] | null;
     reference_designs?: string[] | null;
     items?: Array<{
         item_type?: string | null;
@@ -285,6 +304,16 @@ function uid(prefix: string): string {
 
 function currentDateISO(): string {
     return new Date().toISOString().slice(0, 10);
+}
+
+// Local wall-clock time (not UTC) — this is shown to staff as "what time is
+// it right now", so it must match the clock on the wall, not toISOString().
+function currentTimeHHmm(): string {
+    const now = new Date();
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+
+    return `${hours}:${minutes}`;
 }
 
 function toNumber(value: string): number {
@@ -525,6 +554,7 @@ export function buildEditInitialFormData(order: EditOrderPayload | null | undefi
             job_type_id: args.resolvedJobTypes[0] ? String(args.resolvedJobTypes[0].id) : '',
             job_name: '',
             billing_date: currentDateISO(),
+            billing_time: currentTimeHHmm(),
             due_date: '',
             delivery_method: 'pickup',
             shipping_address: '',
@@ -534,8 +564,8 @@ export function buildEditInitialFormData(order: EditOrderPayload | null | undefi
             payment_status: 'pending',
             artwork_status: 'confirmed',
             artwork_files: [],
-            shirt_artwork_file: null,
-            pants_artwork_file: null,
+            shirt_artwork_files: [],
+            pants_artwork_files: [],
             transfer_slip_file: null,
             shirt_specs: {
                 shirt_type_id: args.resolvedShirtTypes[0] ? String(args.resolvedShirtTypes[0].id) : '',
@@ -702,6 +732,7 @@ export function buildEditInitialFormData(order: EditOrderPayload | null | undefi
         job_type_id: String(resolvedJobTypeId),
         job_name: order.job_name ?? '',
         billing_date: order.billing_date ?? currentDateISO(),
+        billing_time: order.billing_time ?? currentTimeHHmm(),
         due_date: order.due_date ?? '',
         delivery_method: (order.delivery_method as DeliveryMethod) ?? 'pickup',
         shipping_address: order.shipping_address ?? '',
@@ -711,8 +742,8 @@ export function buildEditInitialFormData(order: EditOrderPayload | null | undefi
         payment_status: 'pending',
         artwork_status: 'confirmed',
         artwork_files: [],
-        shirt_artwork_file: null,
-        pants_artwork_file: null,
+        shirt_artwork_files: [],
+        pants_artwork_files: [],
         transfer_slip_file: null,
         shirt_specs: {
             shirt_type_id: toStringValueFromUnknown(shirtSpecPayload.shirt_type_id ?? order.specification?.decoded?.shirt_specs?.shirt_type_id ?? args.resolvedShirtTypes[0]?.id ?? ''),
@@ -859,45 +890,68 @@ function UploadGallery({
     );
 }
 
-function SingleArtworkUpload({
+function MultiArtworkUpload({
     title,
     inputId,
-    file,
-    previewUrl,
+    files,
+    previewUrls,
     error,
     onSelect,
-    onClear,
+    onRemove,
 }: {
     title: string;
     inputId: string;
-    file: File | null;
-    previewUrl: string | null;
+    files: File[];
+    previewUrls: string[];
     error?: string;
     onSelect: (event: ChangeEvent<HTMLInputElement>) => void;
-    onClear: () => void;
+    onRemove: (index: number) => void;
 }) {
-    const displayName = file?.name ?? 'รูปที่บันทึกไว้';
-    const hasPreview = Boolean(previewUrl);
+    // While there are newly-selected files pending upload, show those (they
+    // can be removed before saving). Once none are pending, fall back to
+    // whatever is already saved on the order — those can't be removed here,
+    // same as the general Art Work / reference designs gallery above.
+    const visibleFiles = files.length > 0
+        ? files
+        : previewUrls.map((url, index) => ({
+              name: `Saved artwork ${index + 1}`,
+              size: 0,
+              url,
+          } as File & { url: string }));
 
     return (
         <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
             <p className="text-xs font-semibold text-slate-700">{title}</p>
-            {hasPreview ? (
-                <div className="mt-2 flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2.5">
-                    <img src={previewUrl ?? undefined} alt={displayName} className="size-16 rounded-md object-cover" />
-                    <div className="min-w-0 flex-1">
-                        <p className="truncate text-xs font-semibold text-slate-800">{displayName}</p>
-                        <p className="text-[11px] text-slate-500">{file ? `${Math.round(file.size / 1024).toLocaleString('th-TH')} KB` : 'รูปที่บันทึกไว้'}</p>
-                    </div>
-                    <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="size-8 text-slate-500 hover:text-rose-600"
-                        onClick={onClear}
-                    >
-                        <X className="size-4" />
-                    </Button>
+
+            {visibleFiles.length > 0 ? (
+                <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {visibleFiles.map((file, index) => {
+                        const previewUrl = previewUrls[index] ?? (file as File & { url?: string }).url ?? '';
+                        const displayName = file.name || `Saved artwork ${index + 1}`;
+                        const sizeKb = typeof file.size === 'number' && file.size > 0 ? Math.round(file.size / 1024).toLocaleString('th-TH') : null;
+
+                        return (
+                            <div key={`${displayName}-${index}`} className="overflow-hidden rounded-md border border-slate-200 bg-white">
+                                <div className="aspect-square bg-slate-100">
+                                    <img src={previewUrl} alt={displayName} className="h-full w-full object-cover" />
+                                </div>
+                                <div className="flex items-center justify-between gap-1 p-1.5">
+                                    <p className="truncate text-[10px] text-slate-500">{sizeKb ? `${sizeKb} KB` : 'รูปที่บันทึกไว้'}</p>
+                                    {files.length > 0 ? (
+                                        <Button
+                                            type="button"
+                                            size="icon"
+                                            variant="ghost"
+                                            className="size-6 shrink-0 text-slate-500 hover:text-rose-600"
+                                            onClick={() => onRemove(index)}
+                                        >
+                                            <X className="size-3.5" />
+                                        </Button>
+                                    ) : null}
+                                </div>
+                            </div>
+                        );
+                    })}
                 </div>
             ) : (
                 <div className="mt-2 rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-center text-[11px] text-slate-500">
@@ -906,19 +960,14 @@ function SingleArtworkUpload({
             )}
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
-                <input id={inputId} type="file" accept="image/*" className="hidden" onChange={onSelect} />
+                <input id={inputId} type="file" accept="image/*" multiple className="hidden" onChange={onSelect} />
                 <label
                     htmlFor={inputId}
                     className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700"
                 >
                     <Upload className="size-3.5" />
-                    {file ? 'เปลี่ยนรูป' : 'เลือกไฟล์'}
+                    เพิ่มรูป (เลือกได้หลายไฟล์)
                 </label>
-                {file || previewUrl ? (
-                    <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-[11px] text-rose-600" onClick={onClear}>
-                        ลบรูป
-                    </Button>
-                ) : null}
             </div>
             {error ? <p className="mt-2 text-xs text-[#E21E26]">{error}</p> : null}
         </div>
@@ -947,23 +996,23 @@ export default function OrderCreatePage({
     const [isDragOverSlip, setIsDragOverSlip] = useState(false);
     const [sizeFormMode, setSizeFormMode] = useState<SizeFormMode>('matrix');
     const [artworkPreviewUrls, setArtworkPreviewUrls] = useState<string[]>([]);
-    const [shirtArtworkPreviewUrl, setShirtArtworkPreviewUrl] = useState<string | null>(null);
-    const [pantsArtworkPreviewUrl, setPantsArtworkPreviewUrl] = useState<string | null>(null);
+    const [shirtArtworkPreviewUrls, setShirtArtworkPreviewUrls] = useState<string[]>([]);
+    const [pantsArtworkPreviewUrls, setPantsArtworkPreviewUrls] = useState<string[]>([]);
     const [slipPreviewUrl, setSlipPreviewUrl] = useState<string | null>(null);
 
     useEffect(() => {
         if (!order) {
             setArtworkPreviewUrls([]);
-            setShirtArtworkPreviewUrl(null);
-            setPantsArtworkPreviewUrl(null);
+            setShirtArtworkPreviewUrls([]);
+            setPantsArtworkPreviewUrls([]);
             return;
         }
 
         const previewList = [order.artwork_url, ...(order.reference_designs ?? [])].filter((url): url is string => Boolean(url));
 
         setArtworkPreviewUrls(previewList);
-        setShirtArtworkPreviewUrl(order.shirt_artwork_url ?? null);
-        setPantsArtworkPreviewUrl(order.pants_artwork_url ?? null);
+        setShirtArtworkPreviewUrls(order.shirt_artwork_urls ?? []);
+        setPantsArtworkPreviewUrls(order.pants_artwork_urls ?? []);
     }, [order]);
     const [showConfirmModal, setShowConfirmModal] = useState(false);
     const [showValidationModal, setShowValidationModal] = useState(false);
@@ -973,6 +1022,41 @@ export default function OrderCreatePage({
     const [primaryArtworkSignature, setPrimaryArtworkSignature] = useState<string | null>(null);
 
     const [masterJobTypes, setMasterJobTypes] = useState<OptionItem[]>([]);
+
+    // Color values added inline from the order form (via MasterDataComboBox),
+    // keyed by storage_key rather than by field, so a value added from one
+    // field (e.g. pants fabric color) also shows up in every other field
+    // backed by the same shared catalog (e.g. shirt fabric color).
+    const [extraColorOptions, setExtraColorOptions] = useState<Record<string, OptionItem[]>>({});
+
+    const handleColorOptionAdded = (storageKey: string, option: OptionItem) => {
+        setExtraColorOptions((prev) => {
+            const existing = prev[storageKey] ?? [];
+            if (existing.some((item) => item.id === option.id)) {
+                return prev;
+            }
+
+            return { ...prev, [storageKey]: [...existing, option] };
+        });
+    };
+
+    const withExtraColorOptions = (source: keyof CatalogMap, baseOptions: OptionItem[]): OptionItem[] => {
+        const storageKey = COLOR_FIELD_STORAGE_KEYS[source];
+        const extra = storageKey ? (extraColorOptions[storageKey] ?? []) : [];
+
+        if (extra.length === 0) {
+            return baseOptions;
+        }
+
+        const merged = [...baseOptions];
+        for (const item of extra) {
+            if (!merged.some((existing) => existing.id === item.id)) {
+                merged.push(item);
+            }
+        }
+
+        return merged;
+    };
 
     const resolvedBranches = branches ?? [];
     const resolvedJobTypes = masterJobTypes.length > 0 ? masterJobTypes : (jobTypes ?? []);
@@ -1050,38 +1134,38 @@ export default function OrderCreatePage({
     }, [data.artwork_files, order]);
 
     useEffect(() => {
-        if (!data.shirt_artwork_file) {
-            setShirtArtworkPreviewUrl(order?.shirt_artwork_url ?? null);
+        if (data.shirt_artwork_files.length === 0) {
+            setShirtArtworkPreviewUrls(order?.shirt_artwork_urls ?? []);
 
             return;
         }
 
-        const nextUrl = URL.createObjectURL(data.shirt_artwork_file);
+        const nextUrls = data.shirt_artwork_files.map((file) => URL.createObjectURL(file));
 
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setShirtArtworkPreviewUrl(nextUrl);
+        setShirtArtworkPreviewUrls(nextUrls);
 
         return () => {
-            URL.revokeObjectURL(nextUrl);
+            nextUrls.forEach((url) => URL.revokeObjectURL(url));
         };
-    }, [data.shirt_artwork_file, order]);
+    }, [data.shirt_artwork_files, order]);
 
     useEffect(() => {
-        if (!data.pants_artwork_file) {
-            setPantsArtworkPreviewUrl(order?.pants_artwork_url ?? null);
+        if (data.pants_artwork_files.length === 0) {
+            setPantsArtworkPreviewUrls(order?.pants_artwork_urls ?? []);
 
             return;
         }
 
-        const nextUrl = URL.createObjectURL(data.pants_artwork_file);
+        const nextUrls = data.pants_artwork_files.map((file) => URL.createObjectURL(file));
 
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setPantsArtworkPreviewUrl(nextUrl);
+        setPantsArtworkPreviewUrls(nextUrls);
 
         return () => {
-            URL.revokeObjectURL(nextUrl);
+            nextUrls.forEach((url) => URL.revokeObjectURL(url));
         };
-    }, [data.pants_artwork_file, order]);
+    }, [data.pants_artwork_files, order]);
 
     useEffect(() => {
         if (!data.transfer_slip_file) {
@@ -1352,31 +1436,49 @@ export default function OrderCreatePage({
     };
 
     const handleShirtArtworkSelect = async (event: ChangeEvent<HTMLInputElement>) => {
-        const selected = event.target.files?.[0] ?? null;
+        const selectedFiles = Array.from(event.target.files ?? []);
 
-        if (!selected) {
-            setData('shirt_artwork_file', null);
-
+        if (selectedFiles.length === 0) {
             return;
         }
 
-        const compressed = await compressImage(selected);
-        setData('shirt_artwork_file', compressed);
+        const compressedFiles = await Promise.all(selectedFiles.map((file) => compressImage(file)));
+
+        setData((previous) => ({
+            ...previous,
+            shirt_artwork_files: [...previous.shirt_artwork_files, ...compressedFiles],
+        }));
         event.target.value = '';
     };
 
+    const removeShirtArtworkAt = (index: number) => {
+        setData((previous) => ({
+            ...previous,
+            shirt_artwork_files: previous.shirt_artwork_files.filter((_, currentIndex) => currentIndex !== index),
+        }));
+    };
+
     const handlePantsArtworkSelect = async (event: ChangeEvent<HTMLInputElement>) => {
-        const selected = event.target.files?.[0] ?? null;
+        const selectedFiles = Array.from(event.target.files ?? []);
 
-        if (!selected) {
-            setData('pants_artwork_file', null);
-
+        if (selectedFiles.length === 0) {
             return;
         }
 
-        const compressed = await compressImage(selected);
-        setData('pants_artwork_file', compressed);
+        const compressedFiles = await Promise.all(selectedFiles.map((file) => compressImage(file)));
+
+        setData((previous) => ({
+            ...previous,
+            pants_artwork_files: [...previous.pants_artwork_files, ...compressedFiles],
+        }));
         event.target.value = '';
+    };
+
+    const removePantsArtworkAt = (index: number) => {
+        setData((previous) => ({
+            ...previous,
+            pants_artwork_files: previous.pants_artwork_files.filter((_, currentIndex) => currentIndex !== index),
+        }));
     };
 
     const validateForm = () => {
@@ -1392,6 +1494,10 @@ export default function OrderCreatePage({
 
         if (!data.billing_date) {
             missing.push('วันที่เปิดบิล');
+        }
+
+        if (!data.billing_time) {
+            missing.push('เวลาเปิดบิล');
         }
 
         if (!data.due_date) {
@@ -1521,11 +1627,12 @@ export default function OrderCreatePage({
 
                 return {
                     design_artwork: primaryArtwork,
-                    shirt_artwork: payload.shirt_artwork_file,
-                    pants_artwork: payload.pants_artwork_file,
+                    shirt_artwork: payload.shirt_artwork_files,
+                    pants_artwork: payload.pants_artwork_files,
                     reference_designs: referenceDesigns,
                 };
             })(),
+            duplicate_from_id: order?.duplicate_from_id ?? null,
             customer_id: payload.customer_id ? Number(payload.customer_id) : null,
             customer_name: customerName,
             customer_phone: payload.customer_phone || null,
@@ -1535,7 +1642,7 @@ export default function OrderCreatePage({
             job_type: selectedJobType,
             delivery_method: payload.delivery_method,
             shipping_address: payload.shipping_address || null,
-            order_date: `${payload.billing_date} 00:00:00`,
+            order_date: `${payload.billing_date} ${payload.billing_time || '00:00'}:00`,
             due_date: `${normalizedDueDate} 00:00:00`,
             discount_percent: discountPercent,
             deposit_amount: payload.deposit_amount,
@@ -1617,6 +1724,8 @@ export default function OrderCreatePage({
             : (isEditing ? 'บันทึกการแก้ไข' : 'บันทึกใบสั่งผลิต');
     const formErrors = errors as Record<string, string | undefined>;
     const generalArtworkError = formErrors.design_artwork ?? formErrors['reference_designs.0'];
+    const shirtArtworkError = formErrors.shirt_artwork ?? formErrors['shirt_artwork.0'];
+    const pantsArtworkError = formErrors.pants_artwork ?? formErrors['pants_artwork.0'];
 
     return (
         <>
@@ -1822,13 +1931,13 @@ export default function OrderCreatePage({
                                         />
                                     </label>
 
-                                    <label className="grid gap-1.5 text-xs">
+                                    <div className="grid gap-1.5 text-xs">
                                         <span className="font-semibold text-slate-600">วันที่เปิดบิล</span>
                                         <div className="flex h-9 items-center rounded-md border border-slate-200 bg-slate-50 px-3 text-xs text-slate-700">
                                             <CalendarClock className="mr-2 size-3.5 text-blue-500" />
                                             {data.billing_date}
                                         </div>
-                                    </label>
+                                    </div>
 
                                     <label className="grid gap-1.5 text-xs">
                                         <span className="font-semibold text-slate-600">วันที่รับสินค้า</span>
@@ -2120,16 +2229,16 @@ export default function OrderCreatePage({
                             {activeSpecTab === 'shirt' ? (
                                 <div className="grid gap-3 md:grid-cols-2">
                                     <div className="md:col-span-2">
-                                        <SingleArtworkUpload
+                                        <MultiArtworkUpload
                                             title="Art Work เสื้อ"
                                             inputId="shirt-artwork-upload"
-                                            file={data.shirt_artwork_file}
-                                            previewUrl={shirtArtworkPreviewUrl}
-                                            error={formErrors.shirt_artwork}
+                                            files={data.shirt_artwork_files}
+                                            previewUrls={shirtArtworkPreviewUrls}
+                                            error={shirtArtworkError}
                                             onSelect={(event) => {
                                                 void handleShirtArtworkSelect(event);
                                             }}
-                                            onClear={() => setData('shirt_artwork_file', null)}
+                                            onRemove={removeShirtArtworkAt}
                                         />
                                     </div>
                                     <label className="grid gap-1.5 text-xs md:col-span-2">
@@ -2152,26 +2261,39 @@ export default function OrderCreatePage({
                                     </label>
 
                                     {shirtSelectFields.map((field) => {
-                                        const options = resolvedShirtCatalogs[field.source] ?? [];
+                                        const options = withExtraColorOptions(field.source, resolvedShirtCatalogs[field.source] ?? []);
+                                        const colorStorageKey = COLOR_FIELD_STORAGE_KEYS[field.source];
 
                                         return (
                                             <label key={field.key} className="grid gap-1.5 text-xs">
                                                 <span className="font-semibold text-slate-600">{field.label}</span>
-                                                <Select
-                                                    value={data.shirt_specs[field.key]}
-                                                    onValueChange={(value) => updateShirtSpecs(field.key, value)}
-                                                >
-                                                    <SelectTrigger className="h-9 w-full bg-white text-xs">
-                                                        <SelectValue placeholder={`เลือก${field.label}`} />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {options.map((item) => (
-                                                            <SelectItem key={item.id} value={String(item.id)}>
-                                                                {item.name}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
+                                                {colorStorageKey ? (
+                                                    <MasterDataComboBox
+                                                        storageKey={colorStorageKey}
+                                                        options={options}
+                                                        value={data.shirt_specs[field.key]}
+                                                        onValueChange={(value) => updateShirtSpecs(field.key, value)}
+                                                        onOptionAdded={(option) => handleColorOptionAdded(colorStorageKey, option)}
+                                                        placeholder={`เลือกหรือพิมพ์${field.label}`}
+                                                        aria-label={field.label}
+                                                    />
+                                                ) : (
+                                                    <Select
+                                                        value={data.shirt_specs[field.key]}
+                                                        onValueChange={(value) => updateShirtSpecs(field.key, value)}
+                                                    >
+                                                        <SelectTrigger className="h-9 w-full bg-white text-xs">
+                                                            <SelectValue placeholder={`เลือก${field.label}`} />
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            {options.map((item) => (
+                                                                <SelectItem key={item.id} value={String(item.id)}>
+                                                                    {item.name}
+                                                                </SelectItem>
+                                                            ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                )}
                                             </label>
                                         );
                                     })}
@@ -2229,16 +2351,16 @@ export default function OrderCreatePage({
                             ) : (
                                 <div className="grid gap-3 md:grid-cols-2">
                                     <div className="md:col-span-2">
-                                        <SingleArtworkUpload
+                                        <MultiArtworkUpload
                                             title="Art Work กางเกง"
                                             inputId="pants-artwork-upload"
-                                            file={data.pants_artwork_file}
-                                            previewUrl={pantsArtworkPreviewUrl}
-                                            error={formErrors.pants_artwork}
+                                            files={data.pants_artwork_files}
+                                            previewUrls={pantsArtworkPreviewUrls}
+                                            error={pantsArtworkError}
                                             onSelect={(event) => {
                                                 void handlePantsArtworkSelect(event);
                                             }}
-                                            onClear={() => setData('pants_artwork_file', null)}
+                                            onRemove={removePantsArtworkAt}
                                         />
                                     </div>
                                     <label className="grid gap-1.5 text-xs md:col-span-2">
@@ -2261,26 +2383,39 @@ export default function OrderCreatePage({
                                     </label>
 
                                     {pantsSelectFields.map((field) => {
-                                        const options = resolvedPantsCatalogs[field.source] ?? [];
+                                        const options = withExtraColorOptions(field.source, resolvedPantsCatalogs[field.source] ?? []);
+                                        const colorStorageKey = COLOR_FIELD_STORAGE_KEYS[field.source];
 
                                         return (
                                             <label key={field.key} className="grid gap-1.5 text-xs">
                                                 <span className="font-semibold text-slate-600">{field.label}</span>
-                                                <Select
-                                                    value={data.pants_specs[field.key]}
-                                                    onValueChange={(value) => updatePantsSpecs(field.key, value)}
-                                                >
-                                                    <SelectTrigger className="h-9 w-full bg-white text-xs">
-                                                        <SelectValue placeholder={`เลือก${field.label}`} />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {options.map((item) => (
-                                                            <SelectItem key={item.id} value={String(item.id)}>
-                                                                {item.name}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
+                                                {colorStorageKey ? (
+                                                    <MasterDataComboBox
+                                                        storageKey={colorStorageKey}
+                                                        options={options}
+                                                        value={data.pants_specs[field.key]}
+                                                        onValueChange={(value) => updatePantsSpecs(field.key, value)}
+                                                        onOptionAdded={(option) => handleColorOptionAdded(colorStorageKey, option)}
+                                                        placeholder={`เลือกหรือพิมพ์${field.label}`}
+                                                        aria-label={field.label}
+                                                    />
+                                                ) : (
+                                                    <Select
+                                                        value={data.pants_specs[field.key]}
+                                                        onValueChange={(value) => updatePantsSpecs(field.key, value)}
+                                                    >
+                                                        <SelectTrigger className="h-9 w-full bg-white text-xs">
+                                                            <SelectValue placeholder={`เลือก${field.label}`} />
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            {options.map((item) => (
+                                                                <SelectItem key={item.id} value={String(item.id)}>
+                                                                    {item.name}
+                                                                </SelectItem>
+                                                            ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                )}
                                             </label>
                                         );
                                     })}

@@ -1,3 +1,12 @@
+/**
+ * Reference implementation of the counter floor-card rules.
+ *
+ * The counter page itself no longer calls this: the numbers are computed on the
+ * server (DashboardController::buildCounterFloorStats) so they can summarise
+ * every matching order without shipping every order to the browser. This file
+ * stays as the executable spec that the PHP port mirrors 1:1 — if you change a
+ * rule here, change it there too, and vice versa.
+ */
 type RoutingSummary = {
     id: number;
     is_required?: boolean | null;

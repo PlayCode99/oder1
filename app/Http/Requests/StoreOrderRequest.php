@@ -5,6 +5,7 @@ namespace App\Http\Requests;
 use App\Enums\RoutingStationName;
 use App\Models\Order;
 use Illuminate\Contracts\Validation\ValidationRule;
+use Illuminate\Support\Carbon;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -33,15 +34,42 @@ class StoreOrderRequest extends FormRequest
             'delivery_method' => ['nullable', 'string', Rule::in(['pickup', 'shipping', 'onsite'])],
             'shipping_address' => ['nullable', 'string'],
             'order_date' => ['required', 'date'],
-            'due_date' => ['required', 'date', 'after_or_equal:order_date'],
+            // Compared by day, not by timestamp: the bill carries the real time it
+            // was opened (e.g. 15:28) while a delivery date is always midnight, so
+            // a plain after_or_equal would reject same-day delivery.
+            'due_date' => ['required', 'date', function (string $attribute, mixed $value, callable $fail): void {
+                $orderDate = $this->input('order_date');
+
+                if (! is_string($orderDate) || $orderDate === '' || ! is_string($value) || $value === '') {
+                    return;
+                }
+
+                try {
+                    $due = Carbon::parse($value)->startOfDay();
+                    $opened = Carbon::parse($orderDate)->startOfDay();
+                } catch (\Throwable) {
+                    return;
+                }
+
+                if ($due->lt($opened)) {
+                    $fail('วันที่รับสินค้าต้องไม่ก่อนวันที่เปิดบิล');
+                }
+            }],
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'deposit_amount' => ['nullable', 'numeric', 'min:0'],
             'payment_method' => ['nullable', 'string', Rule::in(['cash', 'transfer'])],
             'design_artwork' => ['nullable', 'file', 'mimes:webp,png,jpg,pdf', 'max:5120'],
-            'shirt_artwork' => ['nullable', 'file', 'image', 'mimes:webp,png,jpg,jpeg', 'max:5120'],
-            'pants_artwork' => ['nullable', 'file', 'image', 'mimes:webp,png,jpg,jpeg', 'max:5120'],
+            'shirt_artwork' => ['nullable', 'array'],
+            'shirt_artwork.*' => ['file', 'image', 'mimes:webp,png,jpg,jpeg', 'max:5120'],
+            'pants_artwork' => ['nullable', 'array'],
+            'pants_artwork.*' => ['file', 'image', 'mimes:webp,png,jpg,jpeg', 'max:5120'],
             'reference_designs' => ['nullable', 'array'],
             'reference_designs.*' => ['file', 'mimes:webp,png,jpg,pdf', 'max:5120'],
+
+            // Set when the form was opened via "เปิดบิลอีกครั้ง": the artwork of
+            // the source order is copied onto the new one server-side, because
+            // the browser only ever holds display URLs for already-saved images.
+            'duplicate_from_id' => ['nullable', 'integer', 'exists:orders,id'],
 
             'items' => ['required', 'array', 'min:1'],
             'items.*.item_type' => ['required', 'string'],
@@ -78,12 +106,12 @@ class StoreOrderRequest extends FormRequest
         return [
             'design_artwork.mimes' => 'ไฟล์ Art Work ทั่วไปต้องเป็นชนิด webp, png, jpg หรือ pdf เท่านั้น',
             'design_artwork.max' => 'ไฟล์ Art Work ทั่วไปต้องมีขนาดไม่เกิน 5MB',
-            'shirt_artwork.image' => 'ไฟล์ Art Work เสื้อ ต้องเป็นไฟล์รูปภาพเท่านั้น',
-            'shirt_artwork.mimes' => 'ไฟล์ Art Work เสื้อ ต้องเป็นชนิด webp, png หรือ jpg เท่านั้น',
-            'shirt_artwork.max' => 'ไฟล์ Art Work เสื้อ ต้องมีขนาดไม่เกิน 5MB',
-            'pants_artwork.image' => 'ไฟล์ Art Work กางเกง ต้องเป็นไฟล์รูปภาพเท่านั้น',
-            'pants_artwork.mimes' => 'ไฟล์ Art Work กางเกง ต้องเป็นชนิด webp, png หรือ jpg เท่านั้น',
-            'pants_artwork.max' => 'ไฟล์ Art Work กางเกง ต้องมีขนาดไม่เกิน 5MB',
+            'shirt_artwork.*.image' => 'ไฟล์ Art Work เสื้อ ต้องเป็นไฟล์รูปภาพเท่านั้น',
+            'shirt_artwork.*.mimes' => 'ไฟล์ Art Work เสื้อ ต้องเป็นชนิด webp, png หรือ jpg เท่านั้น',
+            'shirt_artwork.*.max' => 'ไฟล์ Art Work เสื้อ ต้องมีขนาดไม่เกิน 5MB',
+            'pants_artwork.*.image' => 'ไฟล์ Art Work กางเกง ต้องเป็นไฟล์รูปภาพเท่านั้น',
+            'pants_artwork.*.mimes' => 'ไฟล์ Art Work กางเกง ต้องเป็นชนิด webp, png หรือ jpg เท่านั้น',
+            'pants_artwork.*.max' => 'ไฟล์ Art Work กางเกง ต้องมีขนาดไม่เกิน 5MB',
         ];
     }
 }

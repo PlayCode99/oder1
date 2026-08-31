@@ -112,7 +112,14 @@
         "paths": {
             "@/*": ["./resources/js/*"]
         },
-        "jsx": "react-jsx"
+        "jsx": "react-jsx",
+        // Without this, `types:check` (tsc --noEmit) does not know about
+        // vitest's injected globals (vi/describe/it/expect) or the jest-dom
+        // matcher augmentations, and fails with ~70+ false-positive errors
+        // on every test file — masking real regressions in the noise. This
+        // does not affect `vitest run` itself (it transpiles without type
+        // checking), only the standalone type-check script.
+        "types": ["vitest/globals", "@testing-library/jest-dom"]
     },
     "include": [
         "resources/js/**/*.ts",

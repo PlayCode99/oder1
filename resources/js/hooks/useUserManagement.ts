@@ -32,7 +32,6 @@ export function useUserManagement() {
 
     const openCreate = () => {
         const blankForm = createBlankUserForm();
-        createForm.defaults(blankForm);
         createForm.setData(blankForm);
         createForm.clearErrors();
     };
@@ -64,7 +63,6 @@ export function useUserManagement() {
     const closeEdit = () => {
         setEditingUser(null);
         const blankForm = createBlankUserForm();
-        editForm.defaults(blankForm);
         editForm.setData(blankForm);
         editForm.clearErrors();
     };

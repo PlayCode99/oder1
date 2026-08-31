@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\CatalogItem;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -99,6 +101,24 @@ class ShirtCatalogController extends Controller
             'title' => 'ปลายขา',
             'storageKey' => 'jssport.pants-leg-hem',
         ],
+    ];
+
+    /**
+     * The only storage_keys the quick-add-from-order-form endpoint is
+     * allowed to write to. This is a deliberate whitelist rather than
+     * accepting any storage_key the client sends — otherwise a caller
+     * could use this endpoint to inject rows into unrelated catalogs
+     * (branches, job types, pricing, etc).
+     *
+     * @var array<int, string>
+     */
+    private const QUICK_ADD_ALLOWED_STORAGE_KEYS = [
+        'jssport.shirt-fabric-colors',
+        'jssport.shirt-neck-colors',
+        'jssport.shirt-placket-outer-colors',
+        'jssport.shirt-placket-inner-colors',
+        'jssport.shirt-screen-colors',
+        'jssport.shirt-embroidery-colors',
     ];
 
     public function patterns(Request $request): Response
@@ -223,6 +243,87 @@ class ShirtCatalogController extends Controller
 
         return response()->json([
             'rows' => $this->loadCatalogRows($storageKey),
+        ]);
+    }
+
+    /**
+     * Quick-add a single master-data value from an order form field (e.g. a
+     * color the user typed that isn't in the dropdown yet). Unlike
+     * syncCatalogItems() this never deletes anything — it only ever adds
+     * one row, or returns an existing matching one so the caller doesn't
+     * create a duplicate.
+     */
+    public function quickAddCatalogItem(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'storage_key' => ['required', 'string', Rule::in(self::QUICK_ADD_ALLOWED_STORAGE_KEYS)],
+            'name' => ['required', 'string', 'max:255'],
+        ]);
+
+        $storageKey = (string) $validated['storage_key'];
+        $name = trim((string) $validated['name']);
+
+        if ($name === '') {
+            return response()->json(['message' => 'กรุณาระบุชื่อ'], 422);
+        }
+
+        $existing = CatalogItem::query()
+            ->where('storage_key', $storageKey)
+            ->whereRaw('LOWER(TRIM(name)) = ?', [mb_strtolower($name)])
+            ->orderByDesc('active')
+            ->first();
+
+        if ($existing) {
+            if (! $existing->active) {
+                $existing->active = true;
+                $existing->save();
+            }
+
+            return response()->json([
+                'item' => ['id' => (int) $existing->item_id, 'name' => $existing->name],
+                'created' => false,
+            ]);
+        }
+
+        // The (storage_key, item_id) pair is unique-constrained at the DB
+        // level, so a race between two concurrent quick-adds for the same
+        // key can't corrupt data — the loser just retries with a fresh
+        // next id.
+        $attemptsLeft = 3;
+        $item = null;
+
+        while ($attemptsLeft > 0 && $item === null) {
+            $attemptsLeft--;
+
+            try {
+                $item = DB::transaction(function () use ($storageKey, $name, $request): CatalogItem {
+                    $nextItemId = (int) (CatalogItem::query()
+                        ->where('storage_key', $storageKey)
+                        ->lockForUpdate()
+                        ->max('item_id') ?? 0) + 1;
+
+                    return CatalogItem::query()->create([
+                        'storage_key' => $storageKey,
+                        'item_id' => $nextItemId,
+                        'name' => $name,
+                        'created_by' => $request->user()?->name,
+                        'active' => true,
+                    ]);
+                });
+            } catch (QueryException $exception) {
+                if ($attemptsLeft <= 0) {
+                    throw $exception;
+                }
+            }
+        }
+
+        if ($item === null) {
+            return response()->json(['message' => 'ไม่สามารถบันทึกข้อมูลได้ กรุณาลองใหม่'], 500);
+        }
+
+        return response()->json([
+            'item' => ['id' => (int) $item->item_id, 'name' => $item->name],
+            'created' => true,
         ]);
     }
 

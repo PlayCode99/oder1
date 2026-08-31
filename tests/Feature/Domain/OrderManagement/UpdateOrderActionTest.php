@@ -14,6 +14,8 @@ use App\Models\Customer;
 use App\Models\OrderRouting;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class UpdateOrderActionTest extends TestCase
@@ -126,5 +128,89 @@ class UpdateOrderActionTest extends TestCase
         // The unrelated fields the edit actually targeted should still be applied.
         $this->assertSame('Regression Order (updated)', $updatedOrder->job_name);
         $this->assertSame('2026-08-12 18:00:00', $updatedOrder->due_date->format('Y-m-d H:i:s'));
+    }
+
+    /**
+     * shirt_artwork/pants_artwork are no longer singleFile() media collections.
+     * Like reference_designs, editing an order must only ever ADD newly selected
+     * images to those collections — it must never delete images saved earlier.
+     */
+    public function test_it_appends_new_shirt_and_pants_artwork_images_on_update_without_removing_existing_ones(): void
+    {
+        Storage::fake('public');
+
+        $customer = Customer::create([
+            'customer_code' => 'CUS-UPD-ART-0001',
+            'customer_name' => 'Update Artwork Customer',
+        ]);
+
+        $branch = Branch::create([
+            'branch_code' => 'BR-UPD-ART-0001',
+            'branch_name' => 'Update Artwork Branch',
+        ]);
+
+        $creator = User::factory()->create([
+            'role' => UserRole::Sales,
+            'station_department' => StationDepartment::None,
+        ]);
+
+        $order = (new CreateOrderAction())->execute([
+            'customer_id' => $customer->id,
+            'branch_id' => $branch->id,
+            'job_name' => 'Artwork Update Order',
+            'job_type' => 'งานปัก',
+            'order_date' => '2026-08-01 09:00:00',
+            'due_date' => '2026-08-10 18:00:00',
+            'discount_percent' => 0,
+            'items' => [
+                [
+                    'item_type' => 'shirt',
+                    'size_group' => 'adults',
+                    'size_label' => 'L',
+                    'quantity' => 5,
+                    'unit_price' => 50,
+                ],
+            ],
+            'shirt_artwork' => UploadedFile::fake()->image('shirt-original.jpg', 120, 120),
+            'pants_artwork' => UploadedFile::fake()->image('pants-original.jpg', 120, 120),
+        ], $creator->id);
+
+        $order->refresh();
+        $this->assertCount(1, $order->getMedia('shirt_artwork'));
+        $this->assertCount(1, $order->getMedia('pants_artwork'));
+
+        $updatedOrder = (new UpdateOrderAction())->execute($order, [
+            'customer_id' => $customer->id,
+            'branch_id' => $branch->id,
+            'job_name' => 'Artwork Update Order',
+            'job_type' => 'งานปัก',
+            'order_date' => '2026-08-01 09:00:00',
+            'due_date' => '2026-08-10 18:00:00',
+            'discount_percent' => 0,
+            'items' => [
+                [
+                    'item_type' => 'shirt',
+                    'size_group' => 'adults',
+                    'size_label' => 'L',
+                    'quantity' => 5,
+                    'unit_price' => 50,
+                ],
+            ],
+            'shirt_artwork' => [
+                UploadedFile::fake()->image('shirt-extra-1.jpg', 120, 120),
+                UploadedFile::fake()->image('shirt-extra-2.jpg', 120, 120),
+            ],
+            'pants_artwork' => [
+                UploadedFile::fake()->image('pants-extra-1.jpg', 120, 120),
+            ],
+        ], $creator->id);
+
+        $updatedOrder->refresh();
+
+        // The originally uploaded images must still be present (append, not replace).
+        $this->assertCount(3, $updatedOrder->getMedia('shirt_artwork'));
+        $this->assertCount(2, $updatedOrder->getMedia('pants_artwork'));
+        $this->assertCount(3, $updatedOrder->shirt_artwork_urls);
+        $this->assertCount(2, $updatedOrder->pants_artwork_urls);
     }
 }

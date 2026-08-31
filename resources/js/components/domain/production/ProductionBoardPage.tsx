@@ -2419,9 +2419,12 @@ export function ProductionBoardPage({
                                 const mappedPantsRows = sanitizeSpecRows(mappedSections?.pants);
                                 const shirtEvidenceRows = [...mappedShirtRows, ...explicitShirtRows];
                                 const pantsEvidenceRows = [...mappedPantsRows, ...explicitPantsRows];
-                                const images = [detailOrder.artwork_url, ...(detailOrder.reference_designs ?? [])].filter(
-                                    (url): url is string => Boolean(url),
-                                );
+                                const images = [
+                                    detailOrder.artwork_url,
+                                    ...(detailOrder.shirt_artwork_urls ?? []),
+                                    ...(detailOrder.pants_artwork_urls ?? []),
+                                    ...(detailOrder.reference_designs ?? []),
+                                ].filter((url): url is string => Boolean(url));
                                 const orderItems = detailOrder.items ?? [];
                                 const adultSizeHeaders = ['SS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL', '6XL'];
                                 const kidSizeHeaders = ['JSS', 'JS', 'JM', 'JL'];

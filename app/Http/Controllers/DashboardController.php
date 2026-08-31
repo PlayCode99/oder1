@@ -12,6 +12,7 @@ use App\Models\Order;
 use App\Models\OrderRouting;
 use App\Models\TeamInvitation;
 use App\Support\UserAccessControl;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -20,6 +21,8 @@ use Inertia\Response;
 
 class DashboardController extends Controller
 {
+    private const COUNTER_ORDERS_PER_PAGE = 10;
+
     /**
      * @var array<string, array<string, string>>|null
      */
@@ -61,6 +64,12 @@ class DashboardController extends Controller
             'jssport.shirt-fabrics',
             'jssport.shirt-collars',
             'jssport.shirt-colors',
+            'jssport.shirt-fabric-colors',
+            'jssport.shirt-neck-colors',
+            'jssport.shirt-placket-outer-colors',
+            'jssport.shirt-placket-inner-colors',
+            'jssport.shirt-screen-colors',
+            'jssport.shirt-embroidery-colors',
             'jssport.shirt-plackets',
             'jssport.shirt-cuffs',
             'jssport.shirt-panels',
@@ -102,11 +111,11 @@ class DashboardController extends Controller
                 : ['jssport.shirt-patterns', 'jssport.pants-patterns'],
             'fabric_id' => ['jssport.shirt-fabrics'],
             'neck_style_id' => ['jssport.shirt-collars'],
-            'collar_color' => ['jssport.shirt-colors'],
+            'collar_color' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors'],
             'leg_style' => ['jssport.pants-leg-style'],
             'leg_hem' => ['jssport.pants-leg-hem'],
             'placket_style' => ['jssport.shirt-plackets'],
-            'placket_color' => ['jssport.shirt-colors'],
+            'placket_color' => ['jssport.shirt-placket-outer-colors', 'jssport.shirt-colors'],
             'sleeve_hem' => ['jssport.shirt-cuffs'],
             'sublimation_detail' => ['jssport.shirt-sublimation'],
             default => [],
@@ -210,17 +219,17 @@ class DashboardController extends Controller
         $shirtRows = $this->buildSpecificationRows($shirtSpecs, [
             ['key' => 'pattern_id', 'label' => 'แพทเทิร์น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-patterns']],
             ['key' => 'fabric_id', 'label' => 'เนื้อผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabrics']],
-            ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabric-colors', 'jssport.shirt-colors']],
             ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
-            ['key' => 'neck_color_id', 'label' => 'สีแบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'neck_color_id', 'label' => 'สีแบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors']],
             ['key' => 'collar_id', 'label' => 'ปก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
             ['key' => 'placket_style_id', 'label' => 'แบบสาบ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-plackets']],
-            ['key' => 'placket_outer_color_id', 'label' => 'สีสาบ (นอก)', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
-            ['key' => 'placket_inner_color_id', 'label' => 'สีสาบ (ใน)', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'placket_outer_color_id', 'label' => 'สีสาบ (นอก)', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-placket-outer-colors', 'jssport.shirt-colors']],
+            ['key' => 'placket_inner_color_id', 'label' => 'สีสาบ (ใน)', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-placket-inner-colors', 'jssport.shirt-colors']],
             ['key' => 'sleeve_cuff_id', 'label' => 'ปลายแขน', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-cuffs']],
             ['key' => 'panel_style_id', 'label' => 'แบบต่อ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-panels']],
-            ['key' => 'screen_color_id', 'label' => 'สีสกรีน', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
-            ['key' => 'embroidery_color_id', 'label' => 'สีงานปัก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'screen_color_id', 'label' => 'สีสกรีน', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-screen-colors', 'jssport.shirt-colors']],
+            ['key' => 'embroidery_color_id', 'label' => 'สีงานปัก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-embroidery-colors', 'jssport.shirt-colors']],
             ['key' => 'sublimation_id', 'label' => 'ซับลิเมชั่น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-sublimation']],
             ['key' => 'sleeve_style_text', 'label' => 'แบบแขน', 'type' => 'text'],
             ['key' => 'piping_style_text', 'label' => 'แบบกุ้น', 'type' => 'text'],
@@ -233,11 +242,11 @@ class DashboardController extends Controller
         $pantsRows = $this->buildSpecificationRows($pantsSpecs, [
             ['key' => 'pattern_id', 'label' => 'แพทเทิร์น', 'type' => 'catalog', 'storage_keys' => ['jssport.pants-patterns']],
             ['key' => 'fabric_id', 'label' => 'เนื้อผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabrics']],
-            ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabric-colors', 'jssport.shirt-colors']],
             ['key' => 'leg_style_id', 'label' => 'แบบขา', 'type' => 'catalog', 'storage_keys' => ['jssport.pants-leg-style']],
             ['key' => 'leg_cuff_id', 'label' => 'ปลายขา', 'type' => 'catalog', 'storage_keys' => ['jssport.pants-leg-hem']],
-            ['key' => 'screen_color_id', 'label' => 'สีสกรีน', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
-            ['key' => 'embroidery_color_id', 'label' => 'สีงานปัก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-colors']],
+            ['key' => 'screen_color_id', 'label' => 'สีสกรีน', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-screen-colors', 'jssport.shirt-colors']],
+            ['key' => 'embroidery_color_id', 'label' => 'สีงานปัก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-embroidery-colors', 'jssport.shirt-colors']],
             ['key' => 'sublimation_id', 'label' => 'ซับลิเมชั่น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-sublimation']],
             ['key' => 'panel_style_text', 'label' => 'แบบต่อ', 'type' => 'text'],
             ['key' => 'stripe_style_text', 'label' => 'แบบลา', 'type' => 'text'],
@@ -349,6 +358,31 @@ class DashboardController extends Controller
     /**
      * @return Collection<int, OrderRouting>
      */
+    /**
+     * Counter date filters arrive as raw query strings (Y-m-d from the UI).
+     */
+    private function isValidFilterDate(mixed $value): bool
+    {
+        return is_string($value)
+            && $value !== ''
+            && CarbonImmutable::canBeCreatedFromFormat($value, 'Y-m-d');
+    }
+
+    /**
+     * Date filters compare against the raw column instead of using whereDate(),
+     * because wrapping the column in DATE() stops MySQL from using the
+     * order_date / due_date indexes on a large orders table.
+     */
+    private function startOfFilterDay(string $value): CarbonImmutable
+    {
+        return CarbonImmutable::createFromFormat('Y-m-d', $value)->startOfDay();
+    }
+
+    private function startOfDayAfterFilterDay(string $value): CarbonImmutable
+    {
+        return CarbonImmutable::createFromFormat('Y-m-d', $value)->addDay()->startOfDay();
+    }
+
     private function requiredRoutings(Order $order): Collection
     {
         return $order->routings
@@ -454,59 +488,28 @@ class DashboardController extends Controller
         return null;
     }
 
+    /**
+     * Counter floor cards.
+     *
+     * IMPORTANT: this is a 1:1 port of `deriveFloorStats` in
+     * resources/js/pages/counterStats.ts. The two must stay in sync — the
+     * counter page renders these numbers straight from this output. Covered by
+     * tests/Feature/Http/Controllers/CounterFloorStatsTest.php.
+     *
+     * @param  Collection<int, Order>  $orders
+     * @return array<string, array<string, int>>
+     */
     private function buildCounterFloorStats(Collection $orders): array
     {
         $stats = [
-            'print_room' => [
-                'new_job' => 0,
-                'printer_1' => 0,
-                'printer_2' => 0,
-                'printer_3' => 0,
-                'completed' => 0,
-            ],
-            'design' => [
-                'waiting' => 0,
-                'revising' => 0,
-                'confirmed' => 0,
-            ],
-            'cutting' => [
-                'new_job' => 0,
-                'assigned' => 0,
-                'completed' => 0,
-            ],
-            'heat_press' => [
-                'new_job' => 0,
-                'assigned' => 0,
-                'revising' => 0,
-                'completed' => 0,
-            ],
-            'sewing' => [
-                'new_job' => 0,
-                'assigned' => 0,
-                'completed' => 0,
-            ],
-            'embroidery' => [
-                'new_job' => 0,
-                'assigned' => 0,
-                'completed' => 0,
-            ],
-            'screen_flex' => [
-                'new_job' => 0,
-                'assigned' => 0,
-                'revising' => 0,
-                'completed' => 0,
-            ],
-            'qc' => [
-                'new_job' => 0,
-                'pending_inspect' => 0,
-                'completed' => 0,
-            ],
-            'shipping' => [
-                'pending_ship' => 0,
-                'store_pickup' => 0,
-                'courier' => 0,
-                'onsite_delivery' => 0,
-            ],
+            'print_room' => ['new_job' => 0, 'new_job_qty' => 0, 'printer_1' => 0, 'printer_2' => 0, 'printer_3' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'cutting' => ['new_job' => 0, 'new_job_qty' => 0, 'assigned' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'heat_press' => ['new_job' => 0, 'new_job_qty' => 0, 'assigned' => 0, 'revising' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'sewing' => ['new_job' => 0, 'new_job_qty' => 0, 'assigned' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'embroidery' => ['new_job' => 0, 'new_job_qty' => 0, 'assigned' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'screen_flex' => ['new_job' => 0, 'new_job_qty' => 0, 'assigned' => 0, 'revising' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'qc' => ['new_job' => 0, 'new_job_qty' => 0, 'pending_inspect' => 0, 'completed' => 0, 'completed_qty' => 0],
+            'shipping' => ['pending_ship' => 0, 'pending_ship_qty' => 0, 'store_pickup' => 0, 'courier' => 0, 'onsite_delivery' => 0, 'completed_qty' => 0],
         ];
 
         foreach ($orders as $order) {
@@ -514,67 +517,105 @@ class DashboardController extends Controller
                 continue;
             }
 
-            if ($order->order_status === OrderStatus::Shipping) {
-                $stats['shipping']['pending_ship'] += 1;
-
-                if ($order->delivery_method === 'pickup') {
-                    $stats['shipping']['store_pickup'] += 1;
-                } elseif ($order->delivery_method === 'shipping') {
-                    $stats['shipping']['courier'] += 1;
-                } elseif ($order->delivery_method === 'onsite') {
-                    $stats['shipping']['onsite_delivery'] += 1;
-                }
-            }
-
-            if ($order->order_status === OrderStatus::Draft
-                || $order->order_status === OrderStatus::Designing
-                || $order->order_status === OrderStatus::WaitingCustomerConfirm) {
-                $stats['design']['waiting'] += 1;
-            } elseif ($order->order_status === OrderStatus::QcRejected) {
-                $stats['design']['revising'] += 1;
-            } elseif ($order->order_status === OrderStatus::Confirmed) {
-                $stats['design']['confirmed'] += 1;
-            }
-
+            $quantity = (int) ($order->items_quantity_total ?? 0);
             $requiredRoutings = $this->requiredRoutings($order);
+            $counterStatus = $this->mapOrderToCounterStatus($order);
 
-            $printRouting = $this->resolveFirstMatchingRouting($requiredRoutings, [RoutingStationName::Print->value]);
+            $findStation = fn (array $stationNames): ?OrderRouting => $requiredRoutings
+                ->first(fn (OrderRouting $routing): bool => in_array($routing->station_name?->value, $stationNames, true));
+
+            $printRouting = $findStation([RoutingStationName::Print->value]);
 
             if ($printRouting !== null) {
-                if ($printRouting->status === RoutingStatus::Pending
-                    && $this->isRoutingReady($requiredRoutings, $printRouting->id)) {
+                if ($printRouting->status === RoutingStatus::Pending) {
                     $stats['print_room']['new_job'] += 1;
+                    $stats['print_room']['new_job_qty'] += $quantity;
                 } elseif ($printRouting->status === RoutingStatus::InProgress) {
-                    if ($printRouting->print_machine === 'printer_2') {
-                        $stats['print_room']['printer_2'] += 1;
-                    } elseif ($printRouting->print_machine === 'printer_3') {
-                        $stats['print_room']['printer_3'] += 1;
-                    } else {
-                        $stats['print_room']['printer_1'] += 1;
-                    }
-                } elseif (in_array($printRouting->status->value, [RoutingStatus::Completed->value, RoutingStatus::Skipped->value], true)) {
+                    $machine = match ($printRouting->print_machine) {
+                        'printer_2' => 'printer_2',
+                        'printer_3' => 'printer_3',
+                        default => 'printer_1',
+                    };
+
+                    $stats['print_room'][$machine] += 1;
+                } elseif (in_array($printRouting->status, [RoutingStatus::Completed, RoutingStatus::Skipped], true)) {
                     $stats['print_room']['completed'] += 1;
+                    $stats['print_room']['completed_qty'] += $quantity;
                 }
             }
 
-            $cuttingRouting = $this->resolveFirstMatchingRouting($requiredRoutings, [RoutingStationName::Cutting->value]);
-            $sewingRouting = $this->resolveFirstMatchingRouting($requiredRoutings, [RoutingStationName::Sewing->value]);
-            $embroideryRouting = $this->resolveFirstMatchingRouting($requiredRoutings, [RoutingStationName::Embroidery->value]);
-            $qcRouting = $this->resolveFirstMatchingRouting($requiredRoutings, [RoutingStationName::Qc->value]);
-            $heatPressLikeRouting = $this->resolveHeatPressLikeRouting($requiredRoutings);
+            $this->incrementCounterStageStats($stats, 'cutting', $findStation([RoutingStationName::Cutting->value]), $quantity);
+            $this->incrementCounterStageStats($stats, 'sewing', $findStation([RoutingStationName::Sewing->value]), $quantity);
+            $this->incrementCounterStageStats($stats, 'embroidery', $findStation([RoutingStationName::Embroidery->value]), $quantity);
+            $this->incrementCounterStageStats($stats, 'qc', $findStation([RoutingStationName::Qc->value]), $quantity);
 
-            $this->incrementStageStats($stats, 'cutting', $cuttingRouting, $requiredRoutings);
-            $this->incrementStageStats($stats, 'sewing', $sewingRouting, $requiredRoutings);
-            $this->incrementStageStats($stats, 'embroidery', $embroideryRouting, $requiredRoutings);
-            $this->incrementStageStats($stats, 'qc', $qcRouting, $requiredRoutings);
+            $heatPressLikeRouting = $findStation([RoutingStationName::Screen->value, RoutingStationName::Flex->value]);
 
             if ($heatPressLikeRouting !== null) {
                 $targetRoom = $this->isSublimationJobType($order->job_type) ? 'heat_press' : 'screen_flex';
-                $this->incrementStageStats($stats, $targetRoom, $heatPressLikeRouting, $requiredRoutings, true);
+                $this->incrementCounterStageStats($stats, $targetRoom, $heatPressLikeRouting, $quantity, true);
+            }
+
+            if ($counterStatus === 'shipping') {
+                $stats['shipping']['pending_ship'] += 1;
+                $stats['shipping']['pending_ship_qty'] += $quantity;
+            }
+
+            if ($counterStatus === 'completed') {
+                $bucket = match ($order->delivery_method) {
+                    'shipping' => 'courier',
+                    'onsite' => 'onsite_delivery',
+                    // 'pickup' plus any unset/unknown value falls back to the
+                    // store bucket, exactly like the frontend helper does.
+                    default => 'store_pickup',
+                };
+
+                $stats['shipping'][$bucket] += 1;
+                $stats['shipping']['completed_qty'] += $quantity;
             }
         }
 
         return $stats;
+    }
+
+    /**
+     * Port of `incrementStageStats` in resources/js/pages/counterStats.ts.
+     *
+     * @param  array<string, array<string, int>>  $stats
+     */
+    private function incrementCounterStageStats(array &$stats, string $key, ?OrderRouting $routing, int $quantity, bool $includeRevising = false): void
+    {
+        if ($routing === null) {
+            return;
+        }
+
+        if ($routing->status === RoutingStatus::Pending) {
+            $stats[$key]['new_job'] += 1;
+            $stats[$key]['new_job_qty'] += $quantity;
+
+            return;
+        }
+
+        if ($routing->status === RoutingStatus::InProgress) {
+            if (array_key_exists('pending_inspect', $stats[$key])) {
+                $stats[$key]['pending_inspect'] += 1;
+            } else {
+                $stats[$key]['assigned'] += 1;
+            }
+
+            return;
+        }
+
+        if ($includeRevising && $routing->status === RoutingStatus::Rejected) {
+            $stats[$key]['revising'] += 1;
+
+            return;
+        }
+
+        if (in_array($routing->status, [RoutingStatus::Completed, RoutingStatus::Skipped], true)) {
+            $stats[$key]['completed'] += 1;
+            $stats[$key]['completed_qty'] += $quantity;
+        }
     }
 
     private function mapStationToCounterStatus(?string $stationName, ?string $jobType = null): string
@@ -738,22 +779,10 @@ class DashboardController extends Controller
             ])
             ->values();
 
-        $ordersQuery = Order::query()
-            ->with([
-                'customer:id,customer_name,phone,line_fb',
-                'branch:id,branch_name',
-                'creatorUser:id,name',
-                'receipts',
-                'routings.assignedUser:id,name',
-                'routings.cuttingTeam:id,team_name',
-                'routings.sewingTeam:id,team_name',
-                'routings.embroideryTeam:id,team_name',
-                'routings.screenTeam:id,team_name',
-                'routings.heatPressMachine:id,machine_name',
-                'items',
-                'specification',
-            ])
-            ->latest('order_date');
+        // Filters below are applied to this base query only. It is then used twice:
+        // once with lean columns to aggregate the floor cards over every matching
+        // order, and once paginated with the heavy relations for the visible page.
+        $ordersQuery = Order::query()->latest('order_date');
 
         if ($actor->branch_id !== null) {
             UserAccessControl::applyBranchScope($ordersQuery, $actor);
@@ -786,20 +815,20 @@ class DashboardController extends Controller
             $ordersQuery->where('branch_id', $targetBranchId);
         }
 
-        if (($filters['billing_date_from'] ?? null) !== null && $filters['billing_date_from'] !== '') {
-            $ordersQuery->whereDate('order_date', '>=', (string) $filters['billing_date_from']);
+        if ($this->isValidFilterDate($filters['billing_date_from'] ?? null)) {
+            $ordersQuery->where('order_date', '>=', $this->startOfFilterDay((string) $filters['billing_date_from']));
         }
 
-        if (($filters['billing_date_to'] ?? null) !== null && $filters['billing_date_to'] !== '') {
-            $ordersQuery->whereDate('order_date', '<=', (string) $filters['billing_date_to']);
+        if ($this->isValidFilterDate($filters['billing_date_to'] ?? null)) {
+            $ordersQuery->where('order_date', '<', $this->startOfDayAfterFilterDay((string) $filters['billing_date_to']));
         }
 
-        if (($filters['shipping_date_from'] ?? null) !== null && $filters['shipping_date_from'] !== '') {
-            $ordersQuery->whereDate('due_date', '>=', (string) $filters['shipping_date_from']);
+        if ($this->isValidFilterDate($filters['shipping_date_from'] ?? null)) {
+            $ordersQuery->where('due_date', '>=', $this->startOfFilterDay((string) $filters['shipping_date_from']));
         }
 
-        if (($filters['shipping_date_to'] ?? null) !== null && $filters['shipping_date_to'] !== '') {
-            $ordersQuery->whereDate('due_date', '<=', (string) $filters['shipping_date_to']);
+        if ($this->isValidFilterDate($filters['shipping_date_to'] ?? null)) {
+            $ordersQuery->where('due_date', '<', $this->startOfDayAfterFilterDay((string) $filters['shipping_date_to']));
         }
 
         if (($filters['department'] ?? null) !== null && $filters['department'] !== '') {
@@ -831,11 +860,38 @@ class DashboardController extends Controller
             }
         }
 
-        $ordersCollection = $ordersQuery->get();
+        // Floor cards summarise EVERY matching order, so they must not be limited to
+        // the current page — but they only need a handful of columns, so this query
+        // stays cheap even with tens of thousands of orders.
+        $statsOrders = (clone $ordersQuery)
+            ->reorder()
+            ->select(['id', 'job_type', 'order_status', 'delivery_method'])
+            ->with(['routings:id,order_id,station_name,status,is_required,print_machine'])
+            ->withSum('items as items_quantity_total', 'quantity')
+            ->get();
 
-        $floorStats = $this->buildCounterFloorStats($ordersCollection);
+        $floorStats = $this->buildCounterFloorStats($statsOrders);
 
-        $orders = $ordersCollection->map(function (Order $order): array {
+        // Only the visible page pays for the heavy relations and the detail payload.
+        $ordersPaginator = (clone $ordersQuery)
+            ->with([
+                'customer:id,customer_name,phone,line_fb',
+                'branch:id,branch_name',
+                'creatorUser:id,name',
+                'receipts',
+                'routings.assignedUser:id,name',
+                'routings.cuttingTeam:id,team_name',
+                'routings.sewingTeam:id,team_name',
+                'routings.embroideryTeam:id,team_name',
+                'routings.screenTeam:id,team_name',
+                'routings.heatPressMachine:id,machine_name',
+                'items',
+                'specification',
+            ])
+            ->paginate(self::COUNTER_ORDERS_PER_PAGE)
+            ->withQueryString();
+
+        $orders = collect($ordersPaginator->items())->map(function (Order $order): array {
             $totalPaid = (float) $order->receipts->sum('amount_paid');
             $paymentStatus = $totalPaid >= (float) $order->net_amount
                 ? 'paid'
@@ -861,6 +917,7 @@ class DashboardController extends Controller
             return [
                 'id' => $order->id,
                 'billing_date' => $order->order_date?->format('Y-m-d') ?? '',
+                'billing_time' => $order->order_date?->format('H:i') ?? '',
                 'due_date' => $order->due_date?->format('Y-m-d') ?? '',
                 'order_code' => $order->order_code,
                 'order_item_count' => (int) $order->items->sum(fn ($item): int => (int) $item->quantity),
@@ -940,6 +997,8 @@ class DashboardController extends Controller
                         ])
                         ->values(),
                     'artwork_url' => $order->artwork_url,
+                    'shirt_artwork_urls' => $order->shirt_artwork_urls,
+                    'pants_artwork_urls' => $order->pants_artwork_urls,
                     'reference_designs' => $order->reference_designs,
                 ],
             ];
@@ -982,6 +1041,14 @@ class DashboardController extends Controller
             'branches' => $branches,
             'floorStats' => $floorStats,
             'orders' => $orders->values(),
+            'pagination' => [
+                'current_page' => $ordersPaginator->currentPage(),
+                'last_page' => $ordersPaginator->lastPage(),
+                'per_page' => $ordersPaginator->perPage(),
+                'total' => $ordersPaginator->total(),
+                'from' => $ordersPaginator->firstItem(),
+                'to' => $ordersPaginator->lastItem(),
+            ],
         ]);
     }
 }
