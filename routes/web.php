@@ -3,6 +3,7 @@
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\GarmentPricingController;
 use App\Http\Controllers\OrderController;
+use App\Http\Controllers\OrderDueDateController;
 use App\Http\Controllers\OwnerDashboardController;
 use App\Http\Controllers\Production\CuttingTaskController;
 use App\Http\Controllers\Production\ProductionKanbanController;
@@ -39,6 +40,7 @@ Route::middleware(['auth'])->group(function () {
     Route::get('orders/{order}/edit', [OrderController::class, 'edit'])->name('orders.edit');
     Route::get('orders/{order}/duplicate', [OrderController::class, 'duplicate'])->name('orders.duplicate');
     Route::put('orders/{order}', [OrderController::class, 'update'])->name('orders.update');
+    Route::post('orders/{order}/due-date', [OrderDueDateController::class, 'update'])->name('orders.due-date.update');
     Route::delete('orders/{order}', [OrderController::class, 'destroy'])->name('orders.destroy');
     Route::get('orders', [OrderController::class, 'index'])->name('orders.index');
     Route::post('orders', [OrderController::class, 'store'])->name('orders.store');

@@ -13,7 +13,7 @@ use App\Models\CatalogItem;
 use App\Models\Customer;
 use App\Models\GarmentType;
 use App\Models\Order;
-use App\Models\ProductionDailySetting;
+use App\Support\Orders\DeliveryDateLoads;
 use App\Support\UserAccessControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -129,9 +129,9 @@ class OrderController extends Controller
      * Which catalog each shirt spec dropdown reads and, from the form, writes.
      * Shared with the form as shirtCatalogKeys so both sides agree on it.
      *
-     * แบบคอ and ปก deliberately share one catalog: bills on file reference
-     * neck styles by ids from the collar list, and splitting them would need a
-     * migration of those bills.
+     * แบบคอ and ปก each have their own catalog. The neck-style list began as a
+     * copy of the collar list with the same ids, so bills saved while the two
+     * were shared still name the same neck style.
      *
      * @var array<string, string>
      */
@@ -139,7 +139,7 @@ class OrderController extends Controller
         'patterns' => 'jssport.shirt-patterns',
         'fabrics' => 'jssport.shirt-fabrics',
         'fabric_colors' => 'jssport.shirt-fabric-colors',
-        'neck_styles' => 'jssport.shirt-collars',
+        'neck_styles' => 'jssport.shirt-neck-styles',
         'neck_colors' => 'jssport.shirt-neck-colors',
         'collars' => 'jssport.shirt-collars',
         'placket_styles' => 'jssport.shirt-plackets',
@@ -443,26 +443,12 @@ class OrderController extends Controller
             ];
         }
 
-        $deliveryDateLoads = Order::query()
-            ->whereNotIn('order_status', [OrderStatus::Cancelled, OrderStatus::Completed])
-            // An order being edited is excluded so it does not count its own load
-            // twice. A duplicate is a brand-new order, so the source order's load
-            // still stands and must stay in the totals.
-            ->when($order !== null && ! $isDuplicate, fn ($query) => $query->whereKeyNot($order->id))
-            ->whereDate('due_date', '>=', today())
-            ->join('order_items', 'orders.id', '=', 'order_items.order_id')
-            ->selectRaw('DATE(orders.due_date) as due_date, SUM(order_items.quantity) as total_quantity')
-            ->groupByRaw('DATE(orders.due_date)')
-            ->orderBy('due_date')
-            // Aggregate rows, not orders: drop to the query builder so the
-            // computed columns are read from a plain row object.
-            ->toBase()
-            ->get()
-            ->map(fn (object $row): array => [
-                'date' => Carbon::parse((string) $row->due_date)->toDateString(),
-                'total_quantity' => (int) $row->total_quantity,
-            ])
-            ->values();
+        // An order being edited is excluded so it does not count its own load
+        // twice. A duplicate is a brand-new order, so the source order's load
+        // still stands and must stay in the totals.
+        $deliveryDateLoads = DeliveryDateLoads::from(
+            $order !== null && ! $isDuplicate ? (int) $order->id : null,
+        );
 
         return Inertia::render('Orders/Create', [
             'customers' => $customers,
@@ -481,7 +467,7 @@ class OrderController extends Controller
             'juniorSizes' => $this->sizeOptionsFromStorageKey(ShirtCatalogController::SIZE_JUNIOR_STORAGE_KEY),
             'adultSizes' => $this->sizeOptionsFromStorageKey(ShirtCatalogController::SIZE_ADULTS_STORAGE_KEY),
             'defaultBranchId' => ($order === null || $isDuplicate) ? $actor->branch_id : null,
-            'dailyProductionCapacity' => ProductionDailySetting::query()->first()->daily_capacity ?? 200,
+            'dailyProductionCapacity' => DeliveryDateLoads::dailyCapacity(),
             'deliveryDateLoads' => $deliveryDateLoads,
             'order' => $orderPayload,
         ]);

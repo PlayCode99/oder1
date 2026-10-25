@@ -186,4 +186,24 @@ class CounterPaginationTest extends TestCase
                 }
             });
     }
+
+    /**
+     * The receipt is headed by the branch: its name, its own number and its
+     * colour. It used to print the customer's number under the branch name.
+     */
+    public function test_the_receipt_is_headed_with_the_branch_s_own_number_and_colour(): void
+    {
+        [$creator, $branch, $customer] = $this->makeOrders(1);
+        $branch->update(['phone' => '042-111-222', 'header_color' => '#166534']);
+        $customer->update(['phone' => '0899999999']);
+
+        $this->actingAs($creator)
+            ->get('/counter')
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('orders.0.details.branch_name', 'Counter Pagination Branch')
+                ->where('orders.0.details.branch_phone', '042-111-222')
+                ->where('orders.0.details.branch_header_color', '#166534')
+                ->where('orders.0.details.customer.phone', '0899999999'));
+    }
 }

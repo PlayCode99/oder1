@@ -91,6 +91,8 @@ export interface Branch {
     branch_name: string;
     phone: string | null;
     address: string | null;
+    /** The colour this branch's sheets are headed in; null is the default. */
+    header_color?: string | null;
     created_at: DateTimeString;
     updated_at: DateTimeString;
 
@@ -164,6 +166,13 @@ export interface Order {
     delivery_method: string | null;
     shipping_address: string | null;
     reference_designs?: string[];
+    /**
+     * Every picture on the bill once, with the sheets it is on (see
+     * Order::getArtworkGalleryAttribute).
+     */
+    artwork_gallery?: { url: string; places: string[] }[];
+    /** The date it was due before its latest postponement, when it moved. */
+    postponed_from?: string | null;
     created_at: DateTimeString;
     updated_at: DateTimeString;
     deleted_at: DateTimeString | null;

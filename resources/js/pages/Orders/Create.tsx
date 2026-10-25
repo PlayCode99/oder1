@@ -50,6 +50,11 @@ import {
 } from '@/components/ui/select';
 import { useWebpCompress } from '@/hooks/useWebpCompress';
 import {
+    HOUSE_COLOR_OPTIONS,
+    houseColorTheme,
+    normalizeHouseColor,
+} from '@/lib/houseColors';
+import {
     PANTS_STYLE_LABELS,
     PANTS_STYLES,
     readPantsStyle,
@@ -89,6 +94,7 @@ import type {
     ShirtSpecsForm,
     SizeTier,
 } from './garmentTables';
+import { dropTableArtwork, moveTableArtwork } from './tableArtwork';
 
 type DeliveryMethod = 'pickup' | 'shipping' | 'onsite';
 type PaymentMethod = 'cash' | 'transfer';
@@ -343,6 +349,12 @@ type SportsDayGroupForm = {
     id: string;
     team_name: string;
     fabric_color_id: string;
+    /**
+     * The colour this house's tables are painted in wherever the bill is shown
+     * (#RRGGBB from HOUSE_COLOR_OPTIONS). Empty keeps the colour read from the
+     * house's name, as every bill before this did.
+     */
+    display_color: string;
     rows: SportsDayRowForm[];
     /**
      * Artwork saved against this house before artwork was pinned to sheets.
@@ -537,6 +549,21 @@ type RequestOrderItem = {
     quantity: number;
     unit_price: number;
 };
+
+/**
+ * A spec field as the bill posts it: the picked entry's id as a number, or the
+ * name typed by hand, which the server files as master data when the bill is
+ * saved. Never `Number(name)`, which posted "NaN" and refused the bill.
+ */
+export function catalogIdOrName(value: unknown): number | string | null {
+    const text = String(value ?? '').trim();
+
+    if (text === '' || text === '-') {
+        return null;
+    }
+
+    return /^[1-9]\d*$/.test(text) ? Number(text) : text;
+}
 
 /**
  * Which catalog each spec field picks from. Used to record the master-data name
@@ -1809,11 +1836,64 @@ function createSportsDayRow(
     };
 }
 
+/**
+ * The colour a house's tables are painted in, picked from the shop's set.
+ * Picking the chosen colour again clears it, back to the colour read from the
+ * house's name.
+ */
+function HouseColorPicker({
+    value,
+    houseNumber,
+    onChange,
+}: {
+    value: string;
+    houseNumber: number;
+    onChange: (color: string) => void;
+}) {
+    const selected = normalizeHouseColor(value);
+
+    return (
+        <div className="grid gap-1 text-xs">
+            <span className="font-semibold text-slate-600">สีตาราง</span>
+            <div
+                role="radiogroup"
+                aria-label={`สีตารางของคณะที่ ${houseNumber}`}
+                className="flex h-9 flex-wrap items-center gap-1"
+            >
+                {HOUSE_COLOR_OPTIONS.map((option) => {
+                    const isSelected = selected === option.value;
+
+                    return (
+                        <button
+                            key={option.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            aria-label={option.label}
+                            title={option.label}
+                            onClick={() =>
+                                onChange(isSelected ? '' : option.value)
+                            }
+                            className={
+                                isSelected
+                                    ? 'size-6 rounded-full ring-2 ring-slate-900 ring-offset-2'
+                                    : 'size-6 rounded-full ring-1 ring-slate-300 hover:ring-slate-500'
+                            }
+                            style={{ backgroundColor: option.value }}
+                        />
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 function createSportsDayGroup(teamName = ''): SportsDayGroupForm {
     return {
         id: uid('sd-group'),
         team_name: teamName,
         fabric_color_id: '',
+        display_color: '',
         rows: Array.from({ length: NEW_SPORTS_DAY_ROWS }, () =>
             createSportsDayRow(),
         ),
@@ -2418,6 +2498,7 @@ export function buildEditInitialFormData(
             id: uid(`sd-group-${groupIndex}`),
             team_name: toStringValueFromUnknown(group.team_name),
             fabric_color_id: toStringValueFromUnknown(group.fabric_color_id),
+            display_color: normalizeHouseColor(group.display_color) ?? '',
             saved_artwork: Array.isArray(
                 savedSportsDayArtwork[String(groupIndex)],
             )
@@ -4204,13 +4285,26 @@ export default function OrderCreatePage({
             data.sports_day_groups.filter((group) => group.id !== groupId),
         );
         // Pictures picked for a house that is gone go with it, rather than
-        // land on whichever house takes its place.
+        // land on whichever house takes its place — the ones picked just now
+        // and the ones the bill already carries.
+        const removedHouse = data.sports_day_groups.find(
+            (group) => group.id === groupId,
+        );
+
         setData((previous) => {
             const remaining = { ...previous.sports_day_artwork_files };
 
             delete remaining[groupId];
 
-            return { ...previous, sports_day_artwork_files: remaining };
+            const savedIds = (removedHouse?.saved_artwork ?? [])
+                .map((image) => image.id)
+                .filter((id) => !previous.removed_media_ids.includes(id));
+
+            return {
+                ...previous,
+                sports_day_artwork_files: remaining,
+                removed_media_ids: [...previous.removed_media_ids, ...savedIds],
+            };
         });
     };
 
@@ -4373,9 +4467,44 @@ export default function OrderCreatePage({
     };
 
     const removeGarmentTable = (tableId: string) => {
+        const target = data.garment_tables.find(
+            (table) => table.id === tableId,
+        );
+
         setGarmentTables(
             data.garment_tables.filter((table) => table.id !== tableId),
         );
+
+        if (!target) {
+            return;
+        }
+
+        // Its pictures go with it: new ones are dropped, saved ones removed.
+        // Left behind, they would be pinned to a sheet the bill no longer has.
+        const garment: ArtworkGarment = target.garment;
+        const scopedKey = scopedFileKey(garment);
+
+        setData((previous) => {
+            const { scoped, removedIds } = dropTableArtwork(
+                {
+                    scoped: previous[scopedKey],
+                    scopes: previous.artwork_scopes,
+                    saved: artworkSavedImages[garment],
+                },
+                garmentTableKey(target),
+            );
+
+            return {
+                ...previous,
+                [scopedKey]: scoped,
+                removed_media_ids: [
+                    ...previous.removed_media_ids,
+                    ...removedIds.filter(
+                        (id) => !previous.removed_media_ids.includes(id),
+                    ),
+                ],
+            };
+        });
     };
 
     const mapGarmentTable = (
@@ -4472,6 +4601,32 @@ export default function OrderCreatePage({
         // sheet from a rate card for a garment nobody is making, so the type
         // moves to the first one cut in the new length — or to nothing, if the
         // shop has not set one up yet.
+        // The table is now another sheet, and its pictures follow it there —
+        // new and saved alike — instead of staying on the old one, which no
+        // longer exists and would print them nowhere.
+        const fromKey = garmentTableKey(target);
+        const toKey = garmentTableKey({ ...target, style } as GarmentTable);
+        const movedGarment: ArtworkGarment = target.garment;
+        const movedScopedKey = scopedFileKey(movedGarment);
+
+        setData((previous) => {
+            const { scoped, scopes } = moveTableArtwork(
+                {
+                    scoped: previous[movedScopedKey],
+                    scopes: previous.artwork_scopes,
+                    saved: artworkSavedImages[movedGarment],
+                },
+                fromKey,
+                toKey,
+            );
+
+            return {
+                ...previous,
+                [movedScopedKey]: scoped,
+                artwork_scopes: scopes,
+            };
+        });
+
         mapGarmentTable(tableId, (table) => {
             if (table.garment === 'pants') {
                 const nextType = resolvedPantsTypes.find(
@@ -6410,6 +6565,8 @@ export default function OrderCreatePage({
                     ? data.sports_day_groups.map((group) => ({
                           team_name: group.team_name.trim(),
                           fabric_color_id: group.fabric_color_id,
+                          display_color:
+                              normalizeHouseColor(group.display_color) ?? '',
                           rows: group.rows.map((row) => ({
                               size_group: row.size_group,
                               size_label: row.size_label.trim(),
@@ -6503,6 +6660,29 @@ export default function OrderCreatePage({
                               payload.sports_day_artwork_files,
                           )
                         : {},
+                // Form 3: the house each saved picture belongs to now. A house's
+                // pictures are filed by its position on the bill, so removing a
+                // house ahead of it moves it up — and its pictures must follow,
+                // or they land on the house that takes their old place.
+                sports_day_artwork_houses:
+                    sizeFormMode === 'sports_day'
+                        ? Object.fromEntries(
+                              payload.sports_day_groups.flatMap(
+                                  (group, houseIndex) =>
+                                      group.saved_artwork
+                                          .filter(
+                                              (image) =>
+                                                  !payload.removed_media_ids.includes(
+                                                      image.id,
+                                                  ),
+                                          )
+                                          .map((image) => [
+                                              String(image.id),
+                                              houseIndex,
+                                          ]),
+                              ),
+                          )
+                        : {},
                 duplicate_from_id: order?.duplicate_from_id ?? null,
                 // Saved artwork the user removed. On an edit these media are deleted;
                 // on a duplicate they are simply not copied onto the new bill.
@@ -6532,15 +6712,9 @@ export default function OrderCreatePage({
                 items: JSON.stringify(requestItems),
                 routings,
                 specification: {
-                    pattern_id: activeSpecValues.pattern_id
-                        ? Number(activeSpecValues.pattern_id)
-                        : null,
-                    fabric_id: activeSpecValues.fabric_id
-                        ? Number(activeSpecValues.fabric_id)
-                        : null,
-                    neck_style_id: flatSpecShirt.neck_style_id
-                        ? Number(flatSpecShirt.neck_style_id)
-                        : null,
+                    pattern_id: catalogIdOrName(activeSpecValues.pattern_id),
+                    fabric_id: catalogIdOrName(activeSpecValues.fabric_id),
+                    neck_style_id: catalogIdOrName(flatSpecShirt.neck_style_id),
                     collar_color: flatSpecShirt.neck_color_id || null,
                     leg_style: flatSpecPants.leg_style_id || null,
                     leg_hem: flatSpecPants.leg_cuff_id || null,
@@ -9412,14 +9586,44 @@ export default function OrderCreatePage({
                                                     visibleSavedMedia(
                                                         group.saved_artwork,
                                                     );
+                                                const houseColor =
+                                                    normalizeHouseColor(
+                                                        group.display_color,
+                                                    );
+                                                const houseTheme = houseColor
+                                                    ? houseColorTheme(
+                                                          houseColor,
+                                                      )
+                                                    : null;
 
                                                 return (
                                                     <div
                                                         key={group.id}
                                                         className="overflow-hidden rounded-lg border border-slate-200 bg-white"
+                                                        // The house's colour runs down its card, so
+                                                        // the counter sees which house it is filling in.
+                                                        style={
+                                                            houseTheme
+                                                                ? {
+                                                                      borderLeft: `6px solid ${houseTheme.border}`,
+                                                                  }
+                                                                : undefined
+                                                        }
                                                     >
                                                         <div className="flex flex-wrap items-end gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
-                                                            <span className="mb-1.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-[#174395] text-[11px] font-bold text-white">
+                                                            <span
+                                                                className="mb-1.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-[#174395] text-[11px] font-bold text-white"
+                                                                style={
+                                                                    houseTheme
+                                                                        ? {
+                                                                              backgroundColor:
+                                                                                  houseTheme.background,
+                                                                              color: houseTheme.text,
+                                                                              boxShadow: `inset 0 0 0 1px ${houseTheme.border}`,
+                                                                          }
+                                                                        : undefined
+                                                                }
+                                                            >
                                                                 {groupIndex + 1}
                                                             </span>
                                                             <label className="grid min-w-[150px] flex-1 gap-1 text-xs">
@@ -9502,6 +9706,26 @@ export default function OrderCreatePage({
                                                                     aria-label={`สีผ้าของคณะที่ ${groupIndex + 1}`}
                                                                 />
                                                             </label>
+                                                            <HouseColorPicker
+                                                                value={
+                                                                    group.display_color
+                                                                }
+                                                                houseNumber={
+                                                                    groupIndex +
+                                                                    1
+                                                                }
+                                                                onChange={(
+                                                                    color,
+                                                                ) =>
+                                                                    patchSportsDayGroup(
+                                                                        group.id,
+                                                                        {
+                                                                            display_color:
+                                                                                color,
+                                                                        },
+                                                                    )
+                                                                }
+                                                            />
                                                             <div className="mb-0.5 flex items-center gap-2">
                                                                 <span className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600">
                                                                     <span className="font-mono text-sm font-semibold text-slate-900">

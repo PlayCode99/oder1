@@ -1,7 +1,14 @@
 import { router } from '@inertiajs/react';
-import { ChevronLeft, ChevronRight, Package, Truck } from 'lucide-react';
+import {
+    CalendarClock,
+    ChevronLeft,
+    ChevronRight,
+    Package,
+    Truck,
+} from 'lucide-react';
 import { useMemo, useState } from 'react';
 
+import { thaiDate } from '@/components/domain/counter/RescheduleDeliveryDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -25,6 +32,12 @@ export type DeliveryCalendarOrder = {
     status_label: string;
     is_closed: boolean;
     quantity: number;
+    /** Y-m-d */
+    due_date?: string | null;
+    /** Whether this user may move the date ("เลื่อนส่ง"). */
+    can_reschedule?: boolean;
+    /** The date it was due before its latest move, when it moved. */
+    postponed_from?: string | null;
 };
 
 export type DeliveryCalendarDay = {
@@ -107,6 +120,8 @@ type Props = {
     onOpenChange: (open: boolean) => void;
     calendar: DeliveryCalendar;
     showBranch: boolean;
+    /** Offers "เลื่อนส่ง" on each job the user may move; absent, none is. */
+    onReschedule?: (order: DeliveryCalendarOrder) => void;
 };
 
 export default function DeliveryCalendarDialog({
@@ -114,6 +129,7 @@ export default function DeliveryCalendarDialog({
     onOpenChange,
     calendar,
     showBranch,
+    onReschedule,
 }: Props) {
     const [pickedDate, setPickedDate] = useState<string | null>(null);
     const [requestedMonth, setRequestedMonth] = useState<string | null>(null);
@@ -366,6 +382,29 @@ export default function DeliveryCalendarDialog({
                                                     </span>
                                                 ) : null}
                                             </div>
+                                            {order.postponed_from ? (
+                                                <div className="mt-1 text-[10px] font-semibold text-amber-700">
+                                                    เลื่อนจาก{' '}
+                                                    {thaiDate(
+                                                        order.postponed_from,
+                                                    )}
+                                                </div>
+                                            ) : null}
+                                            {onReschedule &&
+                                            order.can_reschedule ? (
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="mt-1.5 h-7 w-full gap-1 border-[#E21E26]/40 text-xs text-[#E21E26] hover:bg-[#E21E26]/5"
+                                                    onClick={() =>
+                                                        onReschedule(order)
+                                                    }
+                                                >
+                                                    <CalendarClock className="size-3.5" />
+                                                    เลื่อนส่ง
+                                                </Button>
+                                            ) : null}
                                         </li>
                                     ))}
                                 </ul>

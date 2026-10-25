@@ -23,13 +23,14 @@ class BranchManagementController extends Controller
         UserAccessControl::applyBranchScope($query, $request->user(), 'id');
 
         $branches = $query
-            ->get(['id', 'branch_code', 'branch_name', 'phone', 'address'])
+            ->get(['id', 'branch_code', 'branch_name', 'phone', 'address', 'header_color'])
             ->map(fn (Branch $branch): array => [
                 'id' => (int) $branch->id,
                 'branch_code' => (string) $branch->branch_code,
                 'branch_name' => (string) $branch->branch_name,
                 'phone' => (string) ($branch->phone ?? ''),
                 'address' => (string) ($branch->address ?? ''),
+                'header_color' => (string) ($branch->header_color ?? ''),
             ])
             ->values();
 
@@ -49,7 +50,9 @@ class BranchManagementController extends Controller
             'branch_name' => ['required', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],
             'address' => ['nullable', 'string', 'max:1000'],
+            'header_color' => ['nullable', 'string', 'regex:/^#[0-9A-Fa-f]{6}$/'],
         ], [
+            'header_color.regex' => 'สีหัวเอกสารไม่ถูกต้อง',
             'branch_code.required' => 'กรุณากรอกรหัสสาขา',
             'branch_code.unique' => 'รหัสสาขานี้มีอยู่แล้ว',
             'branch_name.required' => 'กรุณากรอกชื่อสาขา',
@@ -60,6 +63,7 @@ class BranchManagementController extends Controller
             'branch_name' => trim((string) $validated['branch_name']),
             'phone' => trim((string) ($validated['phone'] ?? '')),
             'address' => trim((string) ($validated['address'] ?? '')),
+            'header_color' => $this->headerColor($validated['header_color'] ?? null),
         ]);
 
         return back()->with('success', 'สร้างสาขาเรียบร้อยแล้ว');
@@ -74,7 +78,9 @@ class BranchManagementController extends Controller
             'branch_name' => ['required', 'string', 'max:255'],
             'phone' => ['nullable', 'string', 'max:50'],
             'address' => ['nullable', 'string', 'max:1000'],
+            'header_color' => ['nullable', 'string', 'regex:/^#[0-9A-Fa-f]{6}$/'],
         ], [
+            'header_color.regex' => 'สีหัวเอกสารไม่ถูกต้อง',
             'branch_code.required' => 'กรุณากรอกรหัสสาขา',
             'branch_code.unique' => 'รหัสสาขานี้มีอยู่แล้ว',
             'branch_name.required' => 'กรุณากรอกชื่อสาขา',
@@ -85,6 +91,7 @@ class BranchManagementController extends Controller
             'branch_name' => trim((string) $validated['branch_name']),
             'phone' => trim((string) ($validated['phone'] ?? '')),
             'address' => trim((string) ($validated['address'] ?? '')),
+            'header_color' => $this->headerColor($validated['header_color'] ?? null),
         ]);
 
         return back()->with('success', 'อัปเดตข้อมูลสาขาเรียบร้อยแล้ว');
@@ -103,6 +110,14 @@ class BranchManagementController extends Controller
         }
 
         return back()->with('success', 'ลบสาขาเรียบร้อยแล้ว');
+    }
+
+    /** Upper-cased so one colour is always spelled one way; empty is the default. */
+    private function headerColor(mixed $color): ?string
+    {
+        $color = is_string($color) ? strtoupper(trim($color)) : '';
+
+        return $color === '' ? null : $color;
     }
 
     private function ensureBranchAccessible(Request $request, Branch $branch): void

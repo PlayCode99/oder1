@@ -5,6 +5,7 @@ namespace App\Http\Requests;
 use App\Enums\RoutingStationName;
 use App\Enums\SizeTier;
 use App\Models\Order;
+use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Carbon;
@@ -55,6 +56,21 @@ class StoreOrderRequest extends FormRequest
                 $this->merge([$key => $decoded]);
             }
         }
+
+        // A page built before typed names were filed posted them here as
+        // "NaN": the name itself is still in the spec, so the column is read
+        // as not given rather than as a name called NaN.
+        $specification = $this->input('specification');
+
+        if (is_array($specification)) {
+            foreach (['pattern_id', 'fabric_id', 'neck_style_id'] as $column) {
+                if (is_string($specification[$column] ?? null) && strcasecmp(trim($specification[$column]), 'NaN') === 0) {
+                    $specification[$column] = null;
+                }
+            }
+
+            $this->merge(['specification' => $specification]);
+        }
     }
 
     /**
@@ -62,6 +78,24 @@ class StoreOrderRequest extends FormRequest
      *
      * @return array<string, ValidationRule|array<mixed>|string>
      */
+    /**
+     * A master-data id, or a name of at most 255 characters to file as one.
+     */
+    private function catalogIdOrName(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            if (is_int($value) && $value > 0) {
+                return;
+            }
+
+            if (is_string($value) && trim($value) !== '' && mb_strlen(trim($value)) <= 255) {
+                return;
+            }
+
+            $fail('กรุณาเลือกหรือพิมพ์ :attribute ไม่เกิน 255 ตัวอักษร');
+        };
+    }
+
     /**
      * Parses a submitted date down to its day, ignoring any time-of-day, so the
      * date rules compare calendar days rather than timestamps. Returns null for
@@ -162,6 +196,9 @@ class StoreOrderRequest extends FormRequest
 
             // Saved artwork the user removed while editing. Ownership is checked
             // again when deleting, so an id from another order is simply ignored.
+            // Form 3: saved picture id => the house's position on the bill now.
+            'sports_day_artwork_houses' => ['sometimes', 'array'],
+            'sports_day_artwork_houses.*' => ['integer', 'min:0', 'max:99'],
             'removed_media_ids' => ['sometimes', 'array'],
             'removed_media_ids.*' => ['integer', 'min:1'],
 
@@ -185,9 +222,11 @@ class StoreOrderRequest extends FormRequest
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
 
             'specification' => ['sometimes', 'array'],
-            'specification.pattern_id' => ['required', 'integer'],
-            'specification.fabric_id' => ['required', 'integer'],
-            'specification.neck_style_id' => ['nullable', 'integer'],
+            // Each is the picked entry's id, or a name typed by hand, which
+            // is filed as master data when the bill is saved.
+            'specification.pattern_id' => ['required', $this->catalogIdOrName()],
+            'specification.fabric_id' => ['required', $this->catalogIdOrName()],
+            'specification.neck_style_id' => ['nullable', $this->catalogIdOrName()],
             'specification.collar_color' => ['nullable', 'string', 'max:255'],
             'specification.leg_style' => ['nullable', 'string', 'max:255'],
             'specification.leg_hem' => ['nullable', 'string', 'max:255'],

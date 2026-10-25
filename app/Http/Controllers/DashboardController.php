@@ -11,9 +11,11 @@ use App\Models\Branch;
 use App\Models\CatalogItem;
 use App\Models\GarmentType;
 use App\Models\Order;
+use App\Models\OrderDueDateChange;
 use App\Models\OrderRouting;
 use App\Models\TeamInvitation;
 use App\Support\Orders\DeliveryCalendarBuilder;
+use App\Support\Orders\DeliveryDateLoads;
 use App\Support\Orders\OrderCompletion;
 use App\Support\UserAccessControl;
 use Carbon\CarbonImmutable;
@@ -66,6 +68,7 @@ class DashboardController extends Controller
         $keys = [
             'jssport.shirt-patterns',
             'jssport.shirt-fabrics',
+            'jssport.shirt-neck-styles',
             'jssport.shirt-collars',
             'jssport.shirt-colors',
             'jssport.shirt-fabric-colors',
@@ -116,7 +119,7 @@ class DashboardController extends Controller
                 ? ['jssport.pants-patterns', 'jssport.shirt-patterns']
                 : ['jssport.shirt-patterns', 'jssport.pants-patterns'],
             'fabric_id' => ['jssport.shirt-fabrics'],
-            'neck_style_id' => ['jssport.shirt-collars'],
+            'neck_style_id' => ['jssport.shirt-neck-styles', 'jssport.shirt-collars'],
             'collar_color' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors'],
             'leg_style' => ['jssport.pants-leg-style'],
             'leg_hem' => ['jssport.pants-leg-hem'],
@@ -230,7 +233,7 @@ class DashboardController extends Controller
             ['key' => 'pattern_id', 'label' => 'แพทเทิร์น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-patterns']],
             ['key' => 'fabric_id', 'label' => 'เนื้อผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabrics']],
             ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabric-colors', 'jssport.shirt-colors']],
-            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
+            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-styles', 'jssport.shirt-collars']],
             ['key' => 'neck_color_id', 'label' => 'สีแบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors']],
             ['key' => 'collar_id', 'label' => 'ปก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
             ['key' => 'placket_style_id', 'label' => 'แบบสาบ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-plackets']],
@@ -506,6 +509,12 @@ class DashboardController extends Controller
                     // The stored value is a catalog id when the colour came from
                     // the dropdown, and free text when the counter typed one.
                     'color_name' => $colors[$colorId] ?? ($colorId !== '' ? $colorId : ''),
+                    // The colour the house's tables are painted in, picked on the
+                    // form. Absent on older bills, which keep the colour read
+                    // from the house's name.
+                    'display_color' => preg_match('/^#[0-9A-Fa-f]{6}$/', (string) ($group['display_color'] ?? '')) === 1
+                        ? strtoupper((string) $group['display_color'])
+                        : null,
                     'rows' => $rows,
                 ];
             })
@@ -1052,7 +1061,7 @@ class DashboardController extends Controller
         $ordersPaginator = (clone $ordersQuery)
             ->with([
                 'customer:id,customer_name,phone,line_fb',
-                'branch:id,branch_name',
+                'branch:id,branch_name,phone,header_color',
                 'creatorUser:id,name',
                 'receipts',
                 'routings.assignedUser:id,name',
@@ -1063,11 +1072,13 @@ class DashboardController extends Controller
                 'routings.heatPressMachine:id,machine_name',
                 'items',
                 'specification',
+                'latestDueDateChange',
+                'dueDateChanges.changedBy:id,name',
             ])
             ->paginate(self::COUNTER_ORDERS_PER_PAGE)
             ->withQueryString();
 
-        $orders = collect($ordersPaginator->items())->map(function (Order $order): array {
+        $orders = collect($ordersPaginator->items())->map(function (Order $order) use ($actor): array {
             $totalPaid = (float) $order->receipts->sum('amount_paid');
             $paymentStatus = $totalPaid >= (float) $order->net_amount
                 ? 'paid'
@@ -1115,6 +1126,18 @@ class DashboardController extends Controller
                     'billing_date' => $order->order_date?->format('Y-m-d H:i:s'),
                     'due_date' => $order->due_date?->format('Y-m-d H:i:s'),
                     'branch_name' => $order->branch?->branch_name,
+                    // "เลื่อนส่ง": whether this user may move the date, the date
+                    // it moved from last, and every move for the timeline.
+                    'can_reschedule' => $actor->can('reschedule', $order),
+                    'postponed_from' => $order->postponed_from,
+                    'due_date_changes' => $order->dueDateChanges
+                        ->map(fn (OrderDueDateChange $change): array => $change->toDisplay())
+                        ->values()
+                        ->all(),
+                    // The branch's own number and colour head the receipt; the
+                    // customer's number belongs with the customer, below.
+                    'branch_phone' => $order->branch?->phone,
+                    'branch_header_color' => $order->branch?->header_color,
                     'delivery_method' => $order->delivery_method,
                     'shipping_address' => $order->shipping_address,
                     'shipping_delivery_info' => $order->shipping_delivery_info,
@@ -1200,6 +1223,9 @@ class DashboardController extends Controller
                         ->values()
                         ->all(),
                     'reference_designs' => $order->reference_designs,
+                    // Every picture once, with the sheets it is on, so the
+                    // counter shows a file attached to two tables only once.
+                    'artwork_gallery' => $order->artwork_gallery,
                 ],
             ];
         });
@@ -1248,6 +1274,9 @@ class DashboardController extends Controller
                 $actor,
             ),
             'deliveryDueToday' => DeliveryCalendarBuilder::dueTodayCount($actor),
+            // The postpone dialog's date picker, counted as the order form counts.
+            'deliveryDateLoads' => DeliveryDateLoads::from(),
+            'dailyProductionCapacity' => DeliveryDateLoads::dailyCapacity(),
             // Set by the redirect after saving an order, so the counter can offer
             // to print the work sheet straight away.
             'savedOrderCode' => $request->session()->get('order_code'),

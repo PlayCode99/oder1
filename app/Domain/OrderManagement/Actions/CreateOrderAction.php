@@ -14,6 +14,8 @@ use App\Models\Branch;
 use App\Models\Customer;
 use App\Models\Order;
 use App\Models\Receipt;
+use App\Models\User;
+use App\Support\Orders\TypedSpecMasterData;
 use App\Support\Production\ProductionRateSnapshotBuilder;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
@@ -32,6 +34,15 @@ class CreateOrderAction
     {
         try {
             return DB::transaction(function () use ($data, $creatorUserId): Order {
+                // A spec name typed rather than picked is filed as master data
+                // here, inside the bill's own transaction, so a bill that fails
+                // to save files nothing.
+                if (is_array($data['specification'] ?? null)) {
+                    $data['specification'] = (new TypedSpecMasterData(
+                        User::query()->whereKey($creatorUserId)->value('name'),
+                    ))->apply($data['specification']);
+                }
+
                 $this->logCreateStage('start', $creatorUserId, $data, [
                     'has_specification' => is_array($data['specification'] ?? null),
                     'design_artwork' => ($data['design_artwork'] ?? null) instanceof UploadedFile,
@@ -209,6 +220,7 @@ class CreateOrderAction
                     $data['duplicate_from_id'] ?? null,
                     $data['removed_media_ids'] ?? [],
                     $data['artwork_scopes'] ?? [],
+                    $data['sports_day_artwork_houses'] ?? [],
                 );
 
                 // Lock in what the shop pays for this work today. Editing the
@@ -289,9 +301,12 @@ class CreateOrderAction
      * keeps its own images intact -- including images the user removed from the
      * duplicate, which are skipped here rather than deleted from the source.
      */
-    private function copyArtworkFromSourceOrder(Order $order, mixed $sourceOrderId, mixed $removedMediaIds = [], mixed $artworkScopes = []): void
+    private function copyArtworkFromSourceOrder(Order $order, mixed $sourceOrderId, mixed $removedMediaIds = [], mixed $artworkScopes = [], mixed $sportsDayHouses = []): void
     {
         $scopes = $this->artworkScopes($artworkScopes);
+        // Form 3: a house's pictures follow the house to the position it holds
+        // on the new bill, keyed — like the scopes — by the source image's id.
+        $houses = $this->artworkScopes($sportsDayHouses);
 
         if (! is_numeric($sourceOrderId)) {
             return;
@@ -321,6 +336,11 @@ class CreateOrderAction
                 // the bill being copied from untouched.
                 if (array_key_exists((int) $media->id, $scopes) && in_array($collection, Order::batchedArtworkCollections(), true)) {
                     $this->pinArtworkBatch($copy, Order::normalizeArtworkBatch($scopes[(int) $media->id], $collection));
+                }
+
+                if ($collection === 'sports_day_artwork' && is_numeric($houses[(int) $media->id] ?? null)) {
+                    $copy->setCustomProperty('sports_day_group', (int) $houses[(int) $media->id]);
+                    $copy->save();
                 }
             }
         }

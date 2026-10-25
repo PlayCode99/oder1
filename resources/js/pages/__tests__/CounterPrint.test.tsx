@@ -2328,3 +2328,206 @@ describe('counter work-sheet PDF', () => {
         vi.useRealTimers();
     });
 });
+
+describe('the sports-day grid on the receipt', () => {
+    const sportsDayRow = () =>
+        makeRow({
+            details: {
+                size_mode: 'sports_day',
+                items: [],
+                sports_day_groups: [
+                    {
+                        team_name: 'สีฟ้าใส',
+                        color_name: '',
+                        rows: [
+                            {
+                                size_group: 'kids',
+                                size_label: 'JS',
+                                shirt_qty: 100,
+                                shirt_price: 169,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                        ],
+                    },
+                    {
+                        team_name: 'แดงมรกด',
+                        color_name: '',
+                        rows: [
+                            {
+                                size_group: 'kids',
+                                size_label: 'JS',
+                                shirt_qty: 100,
+                                shirt_price: 159,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                            {
+                                size_group: 'kids',
+                                size_label: 'JL',
+                                shirt_qty: 100,
+                                shirt_price: 159,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('prints one price per size, the dearer one, and no money under each house', () => {
+        const html = printedHtml(sportsDayRow());
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const table = doc.querySelector('.sd-table');
+
+        expect(table).not.toBeNull();
+        expect(html).not.toContain('159.00-169.00');
+        expect(
+            [...table!.querySelectorAll('tbody td.sd-price')].map((cell) =>
+                cell.textContent?.trim(),
+            ),
+        ).toEqual(['169.00', '159.00']);
+
+        const money = table!.querySelector('tr.sd-foot-money')!;
+        const cells = [...money.querySelectorAll('td')].map((cell) =>
+            cell.textContent?.trim(),
+        );
+
+        // รวมเงิน, two blank house cells, the blank price span, the total.
+        expect(cells).toEqual(['รวมเงิน', '', '', '', '48,700.00']);
+        expect(money.textContent).not.toContain('16,900.00');
+        expect(money.textContent).not.toContain('31,800.00');
+    });
+
+    it('shows the same on the screen', () => {
+        openDetail(sportsDayRow());
+
+        const label = screen.getAllByText('รวมเงิน').at(-1)!;
+        const row = label.closest('tr')!;
+
+        expect(row.textContent).not.toContain('16,900.00');
+        expect(row.textContent).not.toContain('31,800.00');
+        expect(row.textContent).toContain('48,700.00');
+        expect(screen.queryByText('159.00-169.00')).toBeNull();
+    });
+});
+
+describe('the work receipt dialog on the counter', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('writes the bill dates the way the counter list does', () => {
+        openDetail(
+            makeRow({
+                details: {
+                    billing_date: '2026-10-22 11:06:03',
+                    due_date: '2026-10-31 00:00:00',
+                    branch_name: 'ศรีบุญเรือง',
+                },
+            }),
+        );
+
+        const billInfo = screen
+            .getAllByText(/วันที่เปิดบิล:/)
+            .map((element) => element.textContent ?? '');
+        const dueInfo = screen
+            .getAllByText(/วันที่รับสินค้า:/)
+            .map((element) => element.textContent ?? '');
+
+        expect(billInfo).toContain('วันที่เปิดบิล: 22/10/2569 11:06 น.');
+        expect(dueInfo).toContain('วันที่รับสินค้า: 31/10/2569');
+        expect(document.body.textContent).not.toContain('2026-10-22 11:06:03');
+    });
+
+    it('names the branch right after ใบรับงาน in its heading', () => {
+        openDetail(
+            makeRow({
+                details: { branch_name: 'ศรีบุญเรือง' },
+            }),
+        );
+
+        const heading = screen.getByRole('heading', { name: /^ใบรับงาน/ });
+
+        expect(heading.textContent?.replace(/\s+/g, ' ')).toMatch(
+            /^ใบรับงาน : สาขาศรีบุญเรือง \S+$/,
+        );
+    });
+});
+
+describe('a bill whose delivery date was moved', () => {
+    const moved = () =>
+        makeRow({
+            due_date: '2026-11-05',
+            details: {
+                due_date: '2026-11-05 00:00:00',
+                can_reschedule: true,
+                postponed_from: '2026-10-28',
+                due_date_changes: [
+                    {
+                        from: '2026-10-28',
+                        to: '2026-11-05',
+                        reason: 'ลูกค้าขอเลื่อน',
+                        by: 'สมชาย',
+                        at: '2026-10-24 10:15:00',
+                    },
+                ],
+            },
+        });
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('shows the new date with where it moved from on the bill', () => {
+        openDetail(moved());
+
+        const due = screen
+            .getAllByText(/วันที่รับสินค้า:/)
+            .map((element) => element.textContent ?? '');
+
+        expect(due).toContain(
+            'วันที่รับสินค้า: 05/11/2569(เลื่อนจาก 28/10/2569)',
+        );
+    });
+
+    it('prints where the date moved from on the receipt', () => {
+        const html = printedHtml(moved());
+
+        expect(html).toContain('(เลื่อนจาก 28/10/2569)');
+    });
+
+    it('lists each move, with its reason, in the timeline', () => {
+        renderCounter(moved());
+        fireEvent.click(screen.getAllByRole('button', { name: /ไทม์ไลน์/ })[0]);
+
+        expect(screen.getByText('ประวัติการเลื่อนส่ง')).toBeInTheDocument();
+        expect(
+            screen.getByText(/28\/10\/2569 → 05\/11\/2569/),
+        ).toBeInTheDocument();
+        expect(screen.getByText('เหตุผล: ลูกค้าขอเลื่อน')).toBeInTheDocument();
+        expect(
+            screen.getByText(/โดย สมชาย · 24\/10\/2569 10:15 น\./),
+        ).toBeInTheDocument();
+    });
+});

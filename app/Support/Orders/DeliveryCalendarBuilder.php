@@ -30,7 +30,7 @@ final class DeliveryCalendarBuilder
             ->map(fn (Collection $group): array => [
                 'count' => $group->count(),
                 'quantity' => (int) $group->sum(fn (Order $order): int => (int) $order->items->sum('quantity')),
-                'orders' => $group->map(fn (Order $order): array => self::mapOrder($order))->values()->all(),
+                'orders' => $group->map(fn (Order $order): array => self::mapOrder($order, $actor))->values()->all(),
             ])
             ->all();
 
@@ -58,7 +58,7 @@ final class DeliveryCalendarBuilder
     private static function ordersBetween(Carbon $start, Carbon $end, User $actor): Collection
     {
         return self::baseQuery($actor)
-            ->with(['customer:id,customer_name', 'branch:id,branch_name', 'items', 'routings'])
+            ->with(['customer:id,customer_name', 'branch:id,branch_name', 'items', 'routings', 'latestDueDateChange'])
             ->where('due_date', '>=', $start)
             ->where('due_date', '<', $end)
             ->orderBy('due_date')
@@ -78,11 +78,15 @@ final class DeliveryCalendarBuilder
         return $query;
     }
 
-    private static function mapOrder(Order $order): array
+    private static function mapOrder(Order $order, User $actor): array
     {
         return [
             'id' => $order->id,
             'order_code' => $order->order_code,
+            'due_date' => $order->due_date?->format('Y-m-d'),
+            // "เลื่อนส่ง" is offered only where the actor may move the date.
+            'can_reschedule' => $actor->can('reschedule', $order),
+            'postponed_from' => $order->postponed_from,
             'customer_name' => $order->customer->customer_name ?? '-',
             'branch_name' => $order->branch->branch_name ?? '-',
             'job_name' => $order->job_name,

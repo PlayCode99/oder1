@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace App\Policies;
 
+use App\Enums\OrderStatus;
 use App\Enums\RoutingStatus;
 use App\Enums\UserRole;
 use App\Models\Order;
 use App\Models\User;
+use App\Support\Orders\OrderCompletion;
+use App\Support\UserAccessControl;
 
 class OrderPolicy
 {
@@ -37,6 +40,29 @@ class OrderPolicy
         }
 
         return ! $this->hasProductionProgress($order);
+    }
+
+    /**
+     * Moving the delivery date is for the people who edit bills, but unlike
+     * editing it stays open while the bill is in production — that is when a
+     * date usually has to move. A bill that is finished or cancelled keeps
+     * the date it went out on.
+     */
+    public function reschedule(User $user, Order $order): bool
+    {
+        if (! in_array($user->role, [UserRole::Admin, UserRole::Sales], true)) {
+            return false;
+        }
+
+        if (! UserAccessControl::canAccessBranch($user, (int) $order->branch_id)) {
+            return false;
+        }
+
+        if ($order->order_status === OrderStatus::Cancelled) {
+            return false;
+        }
+
+        return ! OrderCompletion::isClosed($order);
     }
 
     /**

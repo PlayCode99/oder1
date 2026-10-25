@@ -10,6 +10,8 @@ use App\Enums\PaymentType;
 use App\Enums\SizeTier;
 use App\Models\Order;
 use App\Models\Receipt;
+use App\Models\User;
+use App\Support\Orders\TypedSpecMasterData;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,15 @@ class UpdateOrderAction
     {
         try {
             return DB::transaction(function () use ($order, $data, $actorUserId): Order {
+                // A spec name typed rather than picked is filed as master data
+                // here, inside the bill's own transaction, so a bill that fails
+                // to save files nothing.
+                if (is_array($data['specification'] ?? null)) {
+                    $data['specification'] = (new TypedSpecMasterData(
+                        User::query()->whereKey($actorUserId)->value('name'),
+                    ))->apply($data['specification']);
+                }
+
                 $order->update([
                     'customer_id' => isset($data['customer_id']) && $data['customer_id'] !== null
                         ? (int) $data['customer_id']
@@ -169,6 +180,7 @@ class UpdateOrderAction
                 }
 
                 $this->pinArtworkBatches($order, $data['artwork_scopes'] ?? []);
+                $this->refileSportsDayArtwork($order, $data['sports_day_artwork_houses'] ?? []);
 
                 // Form 3 (กีฬาสี): files arrive keyed by colour house index. The
                 // index is stored on the media itself so the artwork can be
@@ -235,6 +247,39 @@ class UpdateOrderAction
      *
      * @param  mixed  $scopes  batch keyed by media id
      */
+    /**
+     * Form 3 files a house's pictures by the house's position on the bill. A
+     * house removed ahead of another moves it up, so each saved picture is
+     * filed again under the position its house holds now.
+     */
+    private function refileSportsDayArtwork(Order $order, mixed $houses): void
+    {
+        $positions = [];
+
+        foreach (Arr::wrap($houses) as $mediaId => $house) {
+            if (is_numeric($mediaId) && is_numeric($house)) {
+                $positions[(int) $mediaId] = (int) $house;
+            }
+        }
+
+        if ($positions === []) {
+            return;
+        }
+
+        // Read fresh rather than from the loaded relation, which still holds
+        // pictures deleted earlier in this same save.
+        foreach ($order->media()->where('collection_name', 'sports_day_artwork')->get() as $media) {
+            $position = $positions[(int) $media->id] ?? null;
+
+            if ($position === null || $media->getCustomProperty('sports_day_group') === $position) {
+                continue;
+            }
+
+            $media->setCustomProperty('sports_day_group', $position);
+            $media->save();
+        }
+    }
+
     private function pinArtworkBatches(Order $order, mixed $scopes): void
     {
         $requested = [];

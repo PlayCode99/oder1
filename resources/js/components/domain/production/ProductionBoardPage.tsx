@@ -3,6 +3,7 @@ import JsBarcode from 'jsbarcode';
 import { ChevronDown, Printer } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import { labelArtworkGallery } from '@/components/domain/orders/artworkGallery';
 
 import { WorkReceiptTopBar } from '@/components/domain/orders/WorkReceiptHeader';
 import {
@@ -31,10 +32,8 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-    DEFAULT_BRANCH_HEADER_COLOR,
-    resolveBranchHeaderColor,
-} from '@/lib/branchHeaderColor';
+import { resolveBranchHeaderColor } from '@/lib/branchHeaderColor';
+import { houseColorTheme, normalizeHouseColor } from '@/lib/houseColors';
 import type {
     CuttingTeam,
     EmbroideryTeam,
@@ -106,7 +105,20 @@ type ProductionGroupKey = `${ProductionGroupBaseKey}_${ProductionGroupStyle}`;
 type ProductionGroupTheme = {
     backgroundColor: string;
     borderColor: string;
+    /** Header text; white unless the ground is pale (a เหลือง or ขาว house). */
+    textColor?: string;
 };
+
+/** A sports-day house's sheet, painted in the colour picked for the house. */
+function houseSheetTheme(color: string): ProductionGroupTheme {
+    const theme = houseColorTheme(color);
+
+    return {
+        backgroundColor: theme.background,
+        borderColor: theme.border,
+        textColor: theme.text,
+    };
+}
 
 /**
  * Colour still says garment and size group, the way the floor already reads it.
@@ -322,6 +334,61 @@ type PersonalizationPrintRow = {
 };
 
 /**
+ * A date the way the counter writes it: day/month/Buddhist year, 04/10/2569.
+ *
+ * Only the date part of the value is read. The server keeps the shop's wall
+ * clock under a UTC label, so 20:35 on the 4th arrives as 2026-10-04T20:35Z —
+ * reading that through the browser's clock would move an evening bill to the
+ * next day.
+ */
+export function counterDate(value: string | null | undefined): string {
+    const match = (value ?? '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+
+    if (!match) {
+        return '-';
+    }
+
+    const [, year, month, day] = match;
+
+    return `${day}/${month}/${Number(year) + 543}`;
+}
+
+/**
+ * The one picture a sheet with none of its own may still show: a picture
+ * attached for every sheet of its garment, or the bill's general artwork.
+ * Never a picture pinned to another sheet — showing a sheet someone else's
+ * picture is worse than showing it none.
+ */
+export function sharedArtworkUrl(
+    order: Pick<
+        Order,
+        | 'artwork_url'
+        | 'shirt_artwork_url'
+        | 'pants_artwork_url'
+        | 'shirt_artwork_media'
+        | 'pants_artwork_media'
+    >,
+    garment: ProductionGroupGarment,
+): string | null {
+    const media =
+        garment === 'shirt'
+            ? order.shirt_artwork_media
+            : order.pants_artwork_media;
+    const general = order.artwork_url?.trim() || null;
+
+    if (media) {
+        return media.find((item) => !item.batch)?.url?.trim() || general;
+    }
+
+    // A payload without batches predates pinning, when every picture was
+    // meant for every sheet.
+    const first =
+        garment === 'shirt' ? order.shirt_artwork_url : order.pants_artwork_url;
+
+    return first?.trim() || general;
+}
+
+/**
  * Whether a name list carries trousers at all. Only then does the roster give
  * them columns: a shirts-only list prints exactly as it always has.
  */
@@ -450,7 +517,7 @@ function resolveGroupHeaderStyle(theme: ProductionGroupTheme): CSSProperties {
     return {
         backgroundColor: theme.backgroundColor,
         borderColor: theme.borderColor,
-        color: '#ffffff',
+        color: theme.textColor ?? '#ffffff',
     };
 }
 
@@ -578,7 +645,7 @@ const shirtSpecFields: SpecField[] = [
         key: 'neck_style_id',
         label: 'แบบคอ',
         type: 'catalog',
-        storageKeys: ['jssport.shirt-collars'],
+        storageKeys: ['jssport.shirt-neck-styles', 'jssport.shirt-collars'],
     },
     {
         key: 'neck_color_id',
@@ -1235,17 +1302,17 @@ export function ProductionBoardPage({
         return 'งานเข้าใหม่';
     };
 
-    const dateOnly = (value: string | null | undefined): string => {
-        if (!value) {
-            return '-';
-        }
+    const dateOnly = (value: string | null | undefined): string =>
+        counterDate(value);
 
-        const normalized = value.includes('T')
-            ? value.split('T')[0]
-            : value.split(' ')[0];
-
-        return normalized || '-';
-    };
+    // A sheet printed before a postponement shows the old day, so the new
+    // one carries where it moved from.
+    const dueDateWithNote = (
+        order: Pick<Order, 'due_date' | 'postponed_from'>,
+    ): string =>
+        order.postponed_from
+            ? `${counterDate(order.due_date)} (เลื่อนจาก ${counterDate(order.postponed_from)})`
+            : counterDate(order.due_date);
 
     const dateTime = (value: string | null | undefined): string => {
         if (!value) {
@@ -1386,8 +1453,7 @@ export function ProductionBoardPage({
         }
 
         const branchHeaderColor = resolveBranchHeaderColor(
-            detailOrder.branch?.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
+            detailOrder.branch?.header_color,
         );
 
         const printWindow = window.open('', '_blank', 'width=1200,height=900');
@@ -3016,12 +3082,6 @@ export function ProductionBoardPage({
                                     ...mappedPantsRows,
                                     ...explicitPantsRows,
                                 ];
-                                const images = [
-                                    detailOrder.artwork_url,
-                                    ...(detailOrder.shirt_artwork_urls ?? []),
-                                    ...(detailOrder.pants_artwork_urls ?? []),
-                                    ...(detailOrder.reference_designs ?? []),
-                                ].filter((url): url is string => Boolean(url));
                                 const orderItems = detailOrder.items ?? [];
                                 const personalizationRows =
                                     readPersonalizationRows(detailOrder);
@@ -3054,6 +3114,7 @@ export function ProductionBoardPage({
                                             mode?: unknown;
                                             sports_day_groups?: Array<{
                                                 team_name?: unknown;
+                                                display_color?: unknown;
                                                 rows?: Array<
                                                     Record<string, unknown>
                                                 >;
@@ -3078,6 +3139,10 @@ export function ProductionBoardPage({
                                                         ''
                                                         ? group.team_name.trim()
                                                         : `คณะที่ ${index + 1}`,
+                                                displayColor:
+                                                    normalizeHouseColor(
+                                                        group.display_color,
+                                                    ),
                                                 rows: (Array.isArray(group.rows)
                                                     ? group.rows
                                                     : []
@@ -3117,6 +3182,29 @@ export function ProductionBoardPage({
                                         return [];
                                     }
                                 })();
+
+                                // Every picture on the bill, once, each with the sheets it is
+                                // on — a colour house's and an old ชุดพละ table's included,
+                                // which this overview used to leave out.
+                                const images = labelArtworkGallery(
+                                    detailOrder.artwork_gallery,
+                                    [
+                                        detailOrder.artwork_url,
+                                        ...(detailOrder.shirt_artwork_urls ??
+                                            []),
+                                        ...(detailOrder.pants_artwork_urls ??
+                                            []),
+                                        ...Object.values(
+                                            detailOrder.sports_day_artwork_urls ??
+                                                {},
+                                        ).flat(),
+                                        ...(detailOrder.reference_designs ??
+                                            []),
+                                    ],
+                                    sportsDayGroups.map(
+                                        (group) => group.teamName,
+                                    ),
+                                );
                                 const isSportsDayOrder =
                                     sportsDayGroups.length > 0;
                                 const adultSizeHeaders = [
@@ -3661,16 +3749,21 @@ export function ProductionBoardPage({
                                                                         '',
                                                             ),
                                                             artworkUrl:
-                                                                (garment ===
-                                                                'shirt'
-                                                                    ? detailOrder.shirt_artwork_url?.trim()
-                                                                    : detailOrder.pants_artwork_url?.trim()) ||
-                                                                detailOrder.artwork_url?.trim() ||
-                                                                null,
-                                                            theme: resolveProductionGroupTheme(
-                                                                definitionKey,
-                                                                'short',
-                                                            ),
+                                                                sharedArtworkUrl(
+                                                                    detailOrder,
+                                                                    garment,
+                                                                ),
+                                                            // The house's own colour when one was
+                                                            // picked; otherwise garment and size, as
+                                                            // every other sheet is coloured.
+                                                            theme: team.displayColor
+                                                                ? houseSheetTheme(
+                                                                      team.displayColor,
+                                                                  )
+                                                                : resolveProductionGroupTheme(
+                                                                      definitionKey,
+                                                                      'short',
+                                                                  ),
                                                             specTitle:
                                                                 resolveProductionSpecTitle(
                                                                     garment,
@@ -3713,29 +3806,11 @@ export function ProductionBoardPage({
                                                   unitTotal * quantity;
                                               const resolveGroupArtworkUrl = (
                                                   garment: ProductionGroupGarment,
-                                              ): string | null => {
-                                                  const normalizedShirtArtwork =
-                                                      detailOrder.shirt_artwork_url?.trim() ||
-                                                      null;
-                                                  const normalizedPantsArtwork =
-                                                      detailOrder.pants_artwork_url?.trim() ||
-                                                      null;
-                                                  const normalizedGeneralArtwork =
-                                                      detailOrder.artwork_url?.trim() ||
-                                                      null;
-
-                                                  if (garment === 'shirt') {
-                                                      return (
-                                                          normalizedShirtArtwork ??
-                                                          normalizedGeneralArtwork
-                                                      );
-                                                  }
-
-                                                  return (
-                                                      normalizedPantsArtwork ??
-                                                      normalizedGeneralArtwork
+                                              ): string | null =>
+                                                  sharedArtworkUrl(
+                                                      detailOrder,
+                                                      garment,
                                                   );
-                                              };
                                               /**
                                                * Every artwork attached for this garment, not just the first.
                                                * The singular *_artwork_url fields only ever hold one image,
@@ -4103,6 +4178,13 @@ export function ProductionBoardPage({
                                                 padding: 6px 2px 0;
                                                 font-size: 11px;
                                                 color: #64748b;
+                                            }
+                                            .p-image-places {
+                                                margin: 2px 2px 0;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                line-height: 1.35;
+                                                color: #334155;
                                             }
                                             .p-image-empty {
                                                 display: flex;
@@ -4868,8 +4950,8 @@ export function ProductionBoardPage({
                                                                     วันที่รับสินค้า
                                                                 </p>
                                                                 <p className="text-sm font-bold text-red-700">
-                                                                    {dateOnly(
-                                                                        detailOrder.due_date,
+                                                                    {dueDateWithNote(
+                                                                        detailOrder,
                                                                     )}
                                                                 </p>
                                                             </div>
@@ -4966,14 +5048,16 @@ export function ProductionBoardPage({
                                                             <div className="p-image-grid">
                                                                 {images.map(
                                                                     (
-                                                                        imageUrl,
+                                                                        image,
                                                                         index,
                                                                     ) => (
                                                                         <a
-                                                                            key={`${imageUrl}-${index}`}
+                                                                            key={
+                                                                                image.url
+                                                                            }
                                                                             className="p-image-card"
                                                                             href={
-                                                                                imageUrl
+                                                                                image.url
                                                                             }
                                                                             target="_blank"
                                                                             rel="noopener noreferrer"
@@ -4982,7 +5066,7 @@ export function ProductionBoardPage({
                                                                             <div className="p-image-wrap">
                                                                                 <img
                                                                                     src={
-                                                                                        imageUrl
+                                                                                        image.url
                                                                                     }
                                                                                     alt={`รูปแนบที่ ${index + 1}`}
                                                                                     loading="lazy"
@@ -4998,6 +5082,16 @@ export function ProductionBoardPage({
                                                                                     ดูเต็มจอ
                                                                                 </span>
                                                                             </div>
+                                                                            {image
+                                                                                .labels
+                                                                                .length >
+                                                                            0 ? (
+                                                                                <p className="p-image-places">
+                                                                                    {image.labels.join(
+                                                                                        ', ',
+                                                                                    )}
+                                                                                </p>
+                                                                            ) : null}
                                                                         </a>
                                                                     ),
                                                                 )}
@@ -5184,6 +5278,11 @@ export function ProductionBoardPage({
                                                                                 group
                                                                                     .theme
                                                                                     .borderColor,
+                                                                            color:
+                                                                                group
+                                                                                    .theme
+                                                                                    .textColor ??
+                                                                                '#ffffff',
                                                                         }}
                                                                         className="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
                                                                         title={`ไปที่ใบงาน ${group.label}`}
@@ -5542,8 +5641,8 @@ export function ProductionBoardPage({
                                                                                           วันที่รับสินค้า:
                                                                                       </span>{' '}
                                                                                       <strong>
-                                                                                          {dateOnly(
-                                                                                              detailOrder.due_date,
+                                                                                          {dueDateWithNote(
+                                                                                              detailOrder,
                                                                                           )}
                                                                                       </strong>
                                                                                   </p>
@@ -6072,8 +6171,8 @@ export function ProductionBoardPage({
                                                                             วันที่รับสินค้า:
                                                                         </span>{' '}
                                                                         <strong>
-                                                                            {dateOnly(
-                                                                                detailOrder.due_date,
+                                                                            {dueDateWithNote(
+                                                                                detailOrder,
                                                                             )}
                                                                         </strong>
                                                                     </p>
@@ -6413,7 +6512,9 @@ export function ProductionBoardPage({
                                 <p>
                                     กำหนดส่ง:{' '}
                                     <span className="font-semibold text-slate-900">
-                                        {dateOnly(timelineOrder?.due_date)}
+                                        {timelineOrder
+                                            ? dueDateWithNote(timelineOrder)
+                                            : '-'}
                                     </span>
                                 </p>
                             </div>

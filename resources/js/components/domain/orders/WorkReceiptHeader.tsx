@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 
 type WorkReceiptTopBarProps = {
     orderCode: string;
+    /** Shown right after ใบรับงาน, so the sheet says whose branch it is. */
+    branchName?: string | null;
     onPrint: () => void;
     onClose: () => void;
     currentStatusLabel?: string;
@@ -19,6 +21,7 @@ type WorkReceiptBillHeaderProps = {
 
 export function WorkReceiptTopBar({
     orderCode,
+    branchName,
     onPrint,
     onClose,
     currentStatusLabel,
@@ -28,7 +31,8 @@ export function WorkReceiptTopBar({
     return (
         <div className="no-print flex items-center justify-between bg-blue-800 px-4 py-2 text-white md:px-5">
             <h2 className="text-base font-bold md:text-lg">
-                ใบรับงาน {orderCode}
+                ใบรับงาน
+                {branchName ? ` : สาขา${branchName}` : ''} {orderCode}
             </h2>
             <div className="flex items-center gap-2">
                 {currentStatusLabel ? (

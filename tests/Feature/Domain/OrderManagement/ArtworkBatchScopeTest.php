@@ -314,4 +314,25 @@ class ArtworkBatchScopeTest extends TestCase
             );
         }
     }
+
+    /**
+     * The same picture attached to two tables is stored twice — each sheet
+     * takes its own — but the overview shows it once, naming both sheets.
+     */
+    public function test_the_overview_shows_a_picture_attached_to_two_tables_once(): void
+    {
+        $order = (new CreateOrderAction)->execute($this->orderData([
+            'shirt_artwork' => [$this->image('ทุกใบ.jpg')],
+            'shirt_artwork_scoped' => [
+                'shirt_kids_short' => [$this->image('โลโก้.jpg')],
+                'shirt_adults_short' => [$this->image('โลโก้.jpg')],
+            ],
+        ]), $this->creator()->id);
+
+        $this->assertCount(3, $order->getMedia('shirt_artwork'));
+        $this->assertSame(
+            [['shirt'], ['shirt_kids_short', 'shirt_adults_short']],
+            array_column($order->artwork_gallery, 'places'),
+        );
+    }
 }

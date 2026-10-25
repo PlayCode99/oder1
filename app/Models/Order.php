@@ -70,6 +70,8 @@ class Order extends Model implements HasMedia
         'sports_day_artwork_urls',
         'pe_uniform_artwork_urls',
         'reference_designs',
+        'artwork_gallery',
+        'postponed_from',
     ];
 
     protected function casts(): array
@@ -152,6 +154,40 @@ class Order extends Model implements HasMedia
     public function routings(): HasMany
     {
         return $this->hasMany(OrderRouting::class);
+    }
+
+    /**
+     * Every move of the delivery date, oldest first.
+     *
+     * @return HasMany<OrderDueDateChange, $this>
+     */
+    public function dueDateChanges(): HasMany
+    {
+        return $this->hasMany(OrderDueDateChange::class)->orderBy('id');
+    }
+
+    /**
+     * The latest move, which is what a sheet printed before it still shows.
+     *
+     * @return HasOne<OrderDueDateChange, $this>
+     */
+    public function latestDueDateChange(): HasOne
+    {
+        return $this->hasOne(OrderDueDateChange::class)->latestOfMany();
+    }
+
+    /**
+     * The date the bill was due before its latest move (Y-m-d), or null when
+     * it never moved. Read only when the move was loaded with the bill, so a
+     * page that does not show it pays no query for it.
+     */
+    public function getPostponedFromAttribute(): ?string
+    {
+        if (! $this->relationLoaded('latestDueDateChange')) {
+            return null;
+        }
+
+        return $this->latestDueDateChange?->from_date?->format('Y-m-d');
     }
 
     /**
@@ -278,6 +314,56 @@ class Order extends Model implements HasMedia
         return $this->getMedia('reference_designs')
             ->map(fn (Media $media): string => $media->getUrl())
             ->toArray();
+    }
+
+    /**
+     * Every picture on the bill, once each, with the sheets it belongs to.
+     *
+     * The same file attached to two tables is stored twice — each sheet needs
+     * its own — but it is one picture, so the overview shows it once and says
+     * whose it is. Files are told apart by name and size, which two different
+     * pictures practically never share.
+     *
+     * `places` names each sheet the picture is on: a batch key such as
+     * 'shirt_kids_short' or 'sports_day_0_shirt_kids', 'sports_day_0' for a
+     * colour house, 'pe_kids' for an old ชุดพละ table, or 'shirt' / 'pants' /
+     * 'all' for a picture meant for every sheet of its garment or the bill.
+     *
+     * @return list<array{url: string, places: list<string>}>
+     */
+    public function getArtworkGalleryAttribute(): array
+    {
+        $gallery = [];
+
+        foreach (self::artworkCollections() as $collection) {
+            foreach ($this->getMedia($collection) as $media) {
+                $place = match ($collection) {
+                    'sports_day_artwork' => is_numeric($media->getCustomProperty('sports_day_group'))
+                        ? 'sports_day_'.(int) $media->getCustomProperty('sports_day_group')
+                        : 'all',
+                    'pe_uniform_artwork' => 'pe_'.(string) $media->getCustomProperty('pe_table'),
+                    'shirt_artwork', 'pants_artwork' => (function () use ($media, $collection): string {
+                        $batch = $media->getCustomProperty(self::ARTWORK_BATCH_PROPERTY);
+
+                        return is_string($batch) && trim($batch) !== ''
+                            ? $batch
+                            : ($collection === 'pants_artwork' ? 'pants' : 'shirt');
+                    })(),
+                    default => 'all',
+                };
+                $fingerprint = $media->name.'|'.$media->size;
+
+                if (! isset($gallery[$fingerprint])) {
+                    $gallery[$fingerprint] = ['url' => $media->getUrl(), 'places' => []];
+                }
+
+                if (! in_array($place, $gallery[$fingerprint]['places'], true)) {
+                    $gallery[$fingerprint]['places'][] = $place;
+                }
+            }
+        }
+
+        return array_values($gallery);
     }
 
     /**

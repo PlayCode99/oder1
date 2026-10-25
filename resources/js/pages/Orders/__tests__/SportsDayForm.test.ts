@@ -23,6 +23,7 @@ const group = (rows: ReturnType<typeof row>[], over = {}) => ({
     id: 'g1',
     team_name: 'คณะสีแดง',
     fabric_color_id: '12',
+    display_color: '',
     rows,
     artwork_files: [] as File[],
     saved_artwork: [] as { id: number; url: string }[],

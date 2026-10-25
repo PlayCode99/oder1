@@ -3,8 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\CatalogItem;
+use App\Support\CatalogItems;
 use App\Support\UserAccessControl;
-use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -70,6 +70,7 @@ class ShirtCatalogController extends Controller
         'jssport.shirt-patterns',
         'jssport.shirt-fabrics',
         'jssport.shirt-fabric-colors',
+        'jssport.shirt-neck-styles',
         'jssport.shirt-collars',
         'jssport.shirt-neck-colors',
         'jssport.shirt-plackets',
@@ -242,65 +243,17 @@ class ShirtCatalogController extends Controller
             return response()->json(['message' => 'กรุณาระบุชื่อ'], 422);
         }
 
-        $existing = CatalogItem::query()
-            ->where('storage_key', $storageKey)
-            ->whereRaw('LOWER(TRIM(name)) = ?', [mb_strtolower($name)])
-            ->orderByDesc('active')
-            ->first();
-
-        if ($existing) {
-            if (! $existing->active) {
-                $existing->active = true;
-                $existing->save();
-            }
-
-            return response()->json([
-                'item' => ['id' => (int) $existing->item_id, 'name' => $existing->name],
-                'created' => false,
-            ]);
-        }
-
-        // The (storage_key, item_id) pair is unique-constrained at the DB
-        // level, so a race between two concurrent quick-adds for the same
-        // key can't corrupt data — the loser just retries with a fresh
-        // next id.
-        $attemptsLeft = 3;
-        $item = null;
-
-        while ($attemptsLeft > 0 && $item === null) {
-            $attemptsLeft--;
-
-            try {
-                $item = DB::transaction(function () use ($storageKey, $name, $request): CatalogItem {
-                    $existingRows = CatalogItem::query()
-                        ->where('storage_key', $storageKey)
-                        ->lockForUpdate();
-                    $nextItemId = (int) ($existingRows->clone()->max('item_id') ?? 0) + 1;
-                    $lastPosition = (int) ($existingRows->clone()->max('sort_order') ?? 0);
-
-                    return CatalogItem::query()->create([
-                        'storage_key' => $storageKey,
-                        'item_id' => $nextItemId,
-                        'name' => $name,
-                        'sort_order' => $lastPosition + 1,
-                        'created_by' => $request->user()?->name,
-                        'active' => true,
-                    ]);
-                });
-            } catch (QueryException $exception) {
-                if ($attemptsLeft <= 0) {
-                    throw $exception;
-                }
-            }
-        }
-
-        if ($item === null) {
-            return response()->json(['message' => 'ไม่สามารถบันทึกข้อมูลได้ กรุณาลองใหม่'], 500);
-        }
+        // The same lookup a bill saved with a typed name goes through, so the
+        // button and the save always land on the same entry.
+        ['item' => $item, 'created' => $created] = CatalogItems::findOrCreate(
+            $storageKey,
+            $name,
+            $request->user()?->name,
+        );
 
         return response()->json([
             'item' => ['id' => (int) $item->item_id, 'name' => $item->name],
-            'created' => true,
+            'created' => $created,
         ]);
     }
 

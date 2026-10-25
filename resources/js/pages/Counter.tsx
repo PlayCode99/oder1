@@ -6,6 +6,7 @@ import {
     ChevronLeft,
     ChevronRight,
     Clock,
+    CalendarClock,
     Copy,
     Factory,
     FilePlus2,
@@ -20,6 +21,16 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import DeliveryCalendarDialog from '@/components/domain/counter/DeliveryCalendarDialog';
 import type { DeliveryCalendar } from '@/components/domain/counter/DeliveryCalendarDialog';
+import type { RescheduleTarget } from '@/components/domain/counter/RescheduleDeliveryDialog';
+import RescheduleDeliveryDialog, {
+    thaiDate,
+} from '@/components/domain/counter/RescheduleDeliveryDialog';
+import type {
+    ArtworkGalleryEntry,
+    LabelledArtwork,
+} from '@/components/domain/orders/artworkGallery';
+import { labelArtworkGallery } from '@/components/domain/orders/artworkGallery';
+import type { DeliveryDateLoad } from '@/components/domain/orders/DeliveryDatePicker';
 import {
     WorkReceiptBillHeader,
     WorkReceiptTopBar,
@@ -49,10 +60,12 @@ import {
     SelectItem,
     SelectTrigger,
 } from '@/components/ui/select';
+import { resolveBranchHeaderColor } from '@/lib/branchHeaderColor';
 import {
-    DEFAULT_BRANCH_HEADER_COLOR,
-    resolveBranchHeaderColor,
-} from '@/lib/branchHeaderColor';
+    houseColorTheme,
+    normalizeHouseColor,
+    readableTextOn,
+} from '@/lib/houseColors';
 import type { DashboardInvitation } from '@/types';
 import {
     buildGarmentSheets,
@@ -256,6 +269,23 @@ export interface OrderTableRow {
         sports_day_groups?: SportsDayGroupPayload[];
         sports_day_artwork_urls?: string[];
         pe_uniform_artwork_urls?: string[];
+        /** Every picture on the bill once, with the sheets it is on. */
+        artwork_gallery?: ArtworkGalleryEntry[];
+        /** Whether this user may move the delivery date ("เลื่อนส่ง"). */
+        can_reschedule?: boolean;
+        /** The date it was due before its latest move, when it moved. */
+        postponed_from?: string | null;
+        /** Every move of the delivery date, oldest first. */
+        due_date_changes?: Array<{
+            from: string;
+            to: string;
+            reason: string;
+            by: string;
+            at: string | null;
+        }>;
+        /** The branch's own number and colour, which head the receipt. */
+        branch_phone?: string | null;
+        branch_header_color?: string | null;
         artwork_url: string | null;
         shirt_artwork_urls: string[];
         pants_artwork_urls: string[];
@@ -282,6 +312,9 @@ type CounterProps = {
     deliveryCalendar: DeliveryCalendar;
     deliveryDueToday?: number;
     savedOrderCode?: string | null;
+    /** Pieces already due per day, for the postpone dialog's date picker. */
+    deliveryDateLoads?: DeliveryDateLoad[];
+    dailyProductionCapacity?: number;
 };
 
 type DepartmentCardProps = {
@@ -481,6 +514,31 @@ function formatTableDate(value: string): string {
     }
 
     return tableDateFormatter.format(date);
+}
+
+/**
+ * A bill's date the way the counter list writes it: 22/10/2569, and with the
+ * time when asked, 22/10/2569 11:06 น. Read straight from the text — the
+ * server sends the shop's own wall clock, so no timezone may move it.
+ */
+export function billDateText(
+    value: string | null | undefined,
+    withTime = false,
+): string {
+    const match = (value ?? '')
+        .trim()
+        .match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+
+    if (!match) {
+        return '-';
+    }
+
+    const [, year, month, day, hour, minute] = match;
+    const date = `${day}/${month}/${Number(year) + 543}`;
+
+    return withTime && hour !== undefined
+        ? `${date} ${hour}:${minute} น.`
+        : date;
 }
 
 function formatShortDate(value: string): string {
@@ -872,6 +930,8 @@ const SIZE_TIER_HEAD_CLASSES: Record<SizeTierKey, string> = {
 export type SportsDayGroupPayload = {
     team_name: string;
     color_name: string;
+    /** The colour picked for the house's tables on Form 3, when one was. */
+    display_color?: string | null;
     rows: Array<{
         /** The range the row is cut in; older bills say kids or adults. */
         size_group: 'kids' | 'junior' | 'adults';
@@ -921,16 +981,7 @@ export function resolveSportsDaySwatch(name: string): {
     );
     const background = match ? match[1] : SPORTS_DAY_FALLBACK_SWATCH;
 
-    // Relative luminance decides the text colour, so a pale house like ครีม or
-    // ขาว keeps readable dark text instead of white on white.
-    const channel = (offset: number): number =>
-        Number.parseInt(background.slice(offset, offset + 2), 16) / 255;
-    const luminance =
-        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-
-    // 0.5 rather than a higher cut: white on ส้ม or เหลือง measures around 3:1,
-    // which is thin on paper, while dark text on the same ground is about 7:1.
-    return { background, text: luminance > 0.5 ? '#0F172A' : '#FFFFFF' };
+    return { background, text: readableTextOn(background) };
 }
 
 export type SportsDayMatrix = {
@@ -962,9 +1013,14 @@ export function buildSportsDayMatrices(
 ): SportsDayMatrix[] {
     const houses = groups.map((group) => {
         const label = group.team_name.trim() || group.color_name.trim() || '-';
-        const swatch = resolveSportsDaySwatch(
-            group.color_name.trim() || group.team_name,
-        );
+        // The colour picked for the house wins; a bill without one keeps the
+        // colour read from the house's name.
+        const picked = normalizeHouseColor(group.display_color);
+        const swatch = picked
+            ? houseColorTheme(picked)
+            : resolveSportsDaySwatch(
+                  group.color_name.trim() || group.team_name,
+              );
 
         return { name: label, ...swatch };
     });
@@ -1049,16 +1105,14 @@ export function buildSportsDayMatrices(
                         .map((row) => priceOf(row)),
                 );
 
-                const distinct = [...new Set(prices)].sort((a, b) => a - b);
-                // Houses normally share one price per size. When they do not,
-                // the range is shown rather than one house's price standing in
-                // for the others.
+                // Houses normally share one price per size; a size dearer for
+                // one house is the counter adding a surcharge, so that price is
+                // the size's price. The amount beside it is still what each
+                // house is charged, added up.
                 const price =
-                    distinct.length === 0
+                    prices.length === 0
                         ? '-'
-                        : distinct.length === 1
-                          ? formatMoney(distinct[0])
-                          : `${formatMoney(distinct[0])}-${formatMoney(distinct[distinct.length - 1])}`;
+                        : formatMoney(Math.max(...prices));
 
                 return {
                     sizeLabel,
@@ -2173,6 +2227,7 @@ function OrderActionMenu({
     editTitle,
     onDuplicate,
     onDelete,
+    onReschedule,
     triggerClassName,
     iconClassName,
 }: {
@@ -2182,6 +2237,7 @@ function OrderActionMenu({
     editTitle: string;
     onDuplicate: (row: OrderTableRow) => void;
     onDelete: (row: OrderTableRow) => void;
+    onReschedule: (row: OrderTableRow) => void;
     triggerClassName: string;
     iconClassName: string;
 }) {
@@ -2216,6 +2272,24 @@ function OrderActionMenu({
                     <Copy className="size-4" />
                     เปิดบิลอีกครั้ง
                 </DropdownMenuItem>
+                {/* Open while the bill is in production, unlike editing;
+                    closed once it is finished or cancelled. */}
+                <DropdownMenuItem
+                    disabled={!row.details?.can_reschedule}
+                    title={
+                        row.details?.can_reschedule
+                            ? 'เลื่อนวันส่ง'
+                            : 'เลื่อนส่งได้เฉพาะงานที่ยังไม่ปิดงาน'
+                    }
+                    onSelect={() => {
+                        if (row.details?.can_reschedule) {
+                            onReschedule(row);
+                        }
+                    }}
+                >
+                    <CalendarClock className="size-4" />
+                    เลื่อนส่ง
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                     disabled={!canDelete}
@@ -2249,6 +2323,7 @@ function OrdersTable({
     isAdmin,
     onDuplicate,
     onDelete,
+    onReschedule,
 }: {
     rows: OrderTableRow[];
     pagination?: CounterPagination;
@@ -2259,6 +2334,7 @@ function OrdersTable({
     isAdmin: boolean;
     onDuplicate: (row: OrderTableRow) => void;
     onDelete: (row: OrderTableRow) => void;
+    onReschedule: (row: OrderTableRow) => void;
 }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -2525,6 +2601,7 @@ function OrdersTable({
                                                     )}
                                                     onDuplicate={onDuplicate}
                                                     onDelete={onDelete}
+                                                    onReschedule={onReschedule}
                                                     triggerClassName="size-9 shrink-0 border border-slate-200 text-slate-600 hover:text-[#E21E26]"
                                                     iconClassName="size-4"
                                                 />
@@ -2668,6 +2745,9 @@ function OrdersTable({
                                                                 onDuplicate
                                                             }
                                                             onDelete={onDelete}
+                                                            onReschedule={
+                                                                onReschedule
+                                                            }
                                                             triggerClassName="size-7 text-slate-500 hover:text-[#E21E26]"
                                                             iconClassName="size-3.5"
                                                         />
@@ -2814,6 +2894,8 @@ export default function Counter({
     deliveryCalendar,
     deliveryDueToday = 0,
     savedOrderCode = null,
+    deliveryDateLoads = [],
+    dailyProductionCapacity = 200,
 }: CounterProps) {
     const { currentTeam, auth } = usePage<{
         currentTeam?: { slug: string } | null;
@@ -2831,6 +2913,18 @@ export default function Counter({
     const handleDuplicateOrder = (row: OrderTableRow) => {
         router.visit(`/orders/${row.id}/duplicate`);
     };
+
+    // "เลื่อนส่ง", opened from a bill's menu or from the delivery calendar.
+    const [rescheduleTarget, setRescheduleTarget] =
+        useState<RescheduleTarget | null>(null);
+    const rescheduleRow = (row: OrderTableRow) =>
+        setRescheduleTarget({
+            id: row.id,
+            orderCode: row.order_code,
+            dueDate: (row.due_date ?? '').slice(0, 10),
+            quantity: row.order_item_count ?? 0,
+            jobName: row.details?.job_name ?? null,
+        });
 
     const handleConfirmDelete = () => {
         if (!pendingDelete) {
@@ -3099,22 +3193,25 @@ export default function Counter({
             : 'วันที่จัดส่ง: ทั้งหมด';
     const detailImages = useMemo(() => {
         if (!selectedOrder?.details) {
-            return [] as string[];
+            return [] as LabelledArtwork[];
         }
 
-        // The same pictures the printed receipt carries: a colour house's and
-        // a ชุดพละ table's are kept apart from the shirt and trouser ones, and
-        // were left off the screen while the paper had them.
-        const list = [
-            selectedOrder.details.artwork_url,
-            ...selectedOrder.details.shirt_artwork_urls,
-            ...selectedOrder.details.pants_artwork_urls,
-            ...(selectedOrder.details.sports_day_artwork_urls ?? []),
-            ...(selectedOrder.details.pe_uniform_artwork_urls ?? []),
-            ...selectedOrder.details.reference_designs,
-        ].filter((url): url is string => Boolean(url));
-
-        return Array.from(new Set(list));
+        // The same pictures the printed receipt carries, each once: a file
+        // attached to two tables is one picture, labelled with both.
+        return labelArtworkGallery(
+            selectedOrder.details.artwork_gallery,
+            [
+                selectedOrder.details.artwork_url,
+                ...selectedOrder.details.shirt_artwork_urls,
+                ...selectedOrder.details.pants_artwork_urls,
+                ...(selectedOrder.details.sports_day_artwork_urls ?? []),
+                ...(selectedOrder.details.pe_uniform_artwork_urls ?? []),
+                ...selectedOrder.details.reference_designs,
+            ],
+            (selectedOrder.details.sports_day_groups ?? []).map(
+                (group) => group.team_name.trim() || group.color_name.trim(),
+            ),
+        );
     }, [selectedOrder]);
     const deliveryMethodValue = selectedOrder?.details?.delivery_method ?? null;
     const shippingAddressValue =
@@ -3570,8 +3667,7 @@ export default function Counter({
         // The same masthead the work receipt prints, so the two sheets read as
         // one document family instead of two systems.
         const branchHeaderColor = resolveBranchHeaderColor(
-            order.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
+            order.branch_header_color,
         );
         const barcodeMarkup = createOrderCodeBarcodeSvg(order.order_code);
         const mastheadMarkup = `
@@ -3588,7 +3684,7 @@ export default function Counter({
                     </div>
                     <div class="masthead-branch">
                         <div><span class="branch-label">สาขา</span> ${escapeHtml(order.branch_name || '-')}</div>
-                        <div class="small">โทร: ${escapeHtml(order.customer.phone || '-')}</div>
+                        <div class="small">โทร: ${escapeHtml(order.branch_phone || '-')}</div>
                         <div class="barcode-wrap">
                             ${barcodeMarkup || `<div class="barcode-fallback">${escapeHtml(order.order_code)}</div>`}
                         </div>
@@ -3596,8 +3692,8 @@ export default function Counter({
                 </div>
                 <div class="masthead-job">
                     <div><span class="job-label">ชื่อหน่วยงาน, ชื่องาน</span> <span class="job-value">${escapeHtml(order.job_name || '-')}</span></div>
-                    <div><span class="job-label">ลูกค้า</span> <span class="job-value">${escapeHtml(order.customer.name || '-')}</span></div>
-                    <div><span class="job-label">วันที่ต้องส่ง</span> <span class="job-value is-date">${escapeHtml(formatTableDate(order.due_date ?? ''))}</span></div>
+                    <div><span class="job-label">ลูกค้า</span> <span class="job-value">${escapeHtml(order.customer.name || '-')}${order.customer.phone ? ` · โทร ${escapeHtml(order.customer.phone)}` : ''}</span></div>
+                    <div><span class="job-label">วันที่ต้องส่ง</span> <span class="job-value is-date">${escapeHtml(formatTableDate(order.due_date ?? ''))}${order.postponed_from ? ` (เลื่อนจาก ${escapeHtml(thaiDate(order.postponed_from))})` : ''}</span></div>
                 </div>
                 <div class="masthead-roster">
                     <span>รวม <strong>${people.length.toLocaleString('th-TH')}</strong> รายชื่อ</span>
@@ -3742,18 +3838,15 @@ export default function Counter({
         const order = sourceOrder.details;
         const billingDate = order.billing_date ?? '';
         const dueDate = order.due_date ?? '';
-        const printImages = Array.from(
-            new Set(
-                [
-                    order.artwork_url,
-                    ...(order.shirt_artwork_urls ?? []),
-                    ...(order.pants_artwork_urls ?? []),
-                    ...(order.sports_day_artwork_urls ?? []),
-                    ...(order.pe_uniform_artwork_urls ?? []),
-                    ...(order.reference_designs ?? []),
-                ].filter((url): url is string => Boolean(url)),
-            ),
-        );
+        // Each picture once, even when it was attached to several tables.
+        const printImages = labelArtworkGallery(order.artwork_gallery, [
+            order.artwork_url,
+            ...(order.shirt_artwork_urls ?? []),
+            ...(order.pants_artwork_urls ?? []),
+            ...(order.sports_day_artwork_urls ?? []),
+            ...(order.pe_uniform_artwork_urls ?? []),
+            ...(order.reference_designs ?? []),
+        ]).map((image) => image.url);
         // Never more than four, and never more columns than pictures.
         const galleryColumns = Math.min(4, Math.max(printImages.length, 1));
         const customerName =
@@ -4012,11 +4105,10 @@ export default function Counter({
                         `<td class="sd-qty">${total.toLocaleString('th-TH')}</td>`,
                 )
                 .join('');
-            const moneyRow = matrix.houseAmounts
-                .map(
-                    (amount) =>
-                        `<td class="sd-money">${formatMoney(amount)}</td>`,
-                )
+            // Each house's money is not repeated under its column: the amount
+            // per size is on the right, and the total stays at the end.
+            const moneyRow = matrix.houses
+                .map(() => '<td class="sd-blank"></td>')
                 .join('');
 
             return `<div class="size-block ${themeClass} sd-block">
@@ -4169,8 +4261,7 @@ export default function Counter({
         );
         const sizeTableTitle = 'ขนาดผู้ใหญ่ มัธยมต้น/มัธยมปลาย';
         const branchHeaderColor = resolveBranchHeaderColor(
-            order.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
+            order.branch_header_color,
         );
         const sizeTableHeadMarkup = `
                                 <tr>
@@ -4286,6 +4377,7 @@ export default function Counter({
                         .info-grid .span-4 { grid-column: 1 / -1; }
                         .info-grid .label { font-weight: 700; }
                         .info-grid .red { color: #E21E26; font-weight: 700; }
+                        .info-grid .postponed { color: #B45309; font-weight: 600; font-size: 0.92em; }
                         .info-grid .green { color: #16a34a; font-weight: 700; }
                         .info-grid .blue { color: #174395; font-weight: 700; }
                         .info-grid .balance { color: #E21E26; font-weight: 800; font-size: 12px; }
@@ -4475,7 +4567,7 @@ export default function Counter({
                                 </div>
                                 <div class="masthead-branch">
                                     <div><span class="branch-label">สาขา</span> ${escapeHtml(order.branch_name || '-')}</div>
-                                    <div class="small">โทร: ${escapeHtml(order.customer.phone || '-')}</div>
+                                    <div class="small">โทร: ${escapeHtml(order.branch_phone || '-')}</div>
                                     <div class="barcode-wrap">
                                         ${barcodeMarkup || `<div class="barcode-fallback">${escapeHtml(order.order_code)}</div>`}
                                     </div>
@@ -4517,9 +4609,9 @@ export default function Counter({
                             <div class="info-grid">
                                 <div class="span-2"><span class="label">ชื่อหน่วยงาน, ชื่องาน:</span> ${escapeHtml(order.job_name || '-')}</div>
                                 <div><span class="label">ประเภทงาน:</span> ${escapeHtml(order.job_type || '-')}</div>
-                                <div><span class="label">ชื่อลูกค้า:</span> ${escapeHtml(order.customer.name || '-')}</div>
+                                <div><span class="label">ชื่อลูกค้า:</span> ${escapeHtml(order.customer.name || '-')}${order.customer.phone ? ` · โทร ${escapeHtml(order.customer.phone)}` : ''}</div>
                                 <div><span class="label">วันที่สั่งสินค้า:</span> ${escapeHtml(formatTableDate(billingDate))}</div>
-                                <div><span class="label">วันที่รับสินค้า:</span> <span class="red">${escapeHtml(formatTableDate(dueDate))}</span></div>
+                                <div><span class="label">วันที่รับสินค้า:</span> <span class="red">${escapeHtml(formatTableDate(dueDate))}</span>${order.postponed_from ? ` <span class="postponed">(เลื่อนจาก ${escapeHtml(thaiDate(order.postponed_from))})</span>` : ''}</div>
                                 <div><span class="label">ช่องทางติดต่อ:</span> ${escapeHtml(order.customer.line_fb || '-')}</div>
                                 <div><span class="label">จัดส่ง:</span> ${escapeHtml(order.delivery_method ? (order.delivery_method === 'shipping' ? 'ขนส่ง' : order.delivery_method === 'onsite' ? 'หน้างาน' : order.delivery_method === 'pickup' ? 'รับหน้าร้าน' : order.delivery_method) : '-')}</div>
                                 ${order.delivery_method && ['shipping', 'onsite'].includes(order.delivery_method) ? `<div class="span-4"><span class="label">รายละเอียด:</span> ${escapeHtml(order.shipping_address || '-')}</div>` : ''}
@@ -4678,6 +4770,24 @@ export default function Counter({
                 // The branch filter only lists more than one branch for head
                 // office, which is exactly who may see other branches' jobs.
                 showBranch={branches.length > 1}
+                onReschedule={(order) =>
+                    setRescheduleTarget({
+                        id: order.id,
+                        orderCode: order.order_code,
+                        dueDate: order.due_date ?? '',
+                        quantity: order.quantity,
+                        jobName: order.job_name,
+                    })
+                }
+            />
+
+            <RescheduleDeliveryDialog
+                key={rescheduleTarget?.id ?? 'none'}
+                target={rescheduleTarget}
+                today={deliveryCalendar.today}
+                loads={deliveryDateLoads}
+                dailyCapacity={dailyProductionCapacity}
+                onClose={() => setRescheduleTarget(null)}
             />
 
             <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -4921,6 +5031,7 @@ export default function Counter({
                             isAdmin={isAdmin}
                             onDuplicate={handleDuplicateOrder}
                             onDelete={setPendingDelete}
+                            onReschedule={rescheduleRow}
                         />
                     </section>
                 </div>
@@ -4975,6 +5086,7 @@ export default function Counter({
                         <div className="sticky top-0 z-20">
                             <WorkReceiptTopBar
                                 orderCode={selectedOrder.details.order_code}
+                                branchName={selectedOrder.details.branch_name}
                                 onPrint={handlePrintDocument}
                                 onClose={() => setSelectedOrder(null)}
                                 actions={
@@ -5001,7 +5113,7 @@ export default function Counter({
                         <div ref={printRef} className="space-y-3 p-3 md:p-4">
                             <WorkReceiptBillHeader
                                 branchName={selectedOrder.details.branch_name}
-                                phone={selectedOrder.details.customer.phone}
+                                phone={selectedOrder.details.branch_phone}
                             />
 
                             <div className="grid gap-3 md:grid-cols-[1fr_320px]">
@@ -5011,22 +5123,34 @@ export default function Counter({
                                     </h3>
                                     {detailImages.length > 0 ? (
                                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                                            {detailImages.map((url, index) => (
-                                                <div
-                                                    key={`${url}-${index}`}
-                                                    className="overflow-hidden rounded-md border border-slate-200 bg-slate-50"
-                                                >
-                                                    <img
-                                                        src={url}
-                                                        alt={`attachment-${index + 1}`}
-                                                        className="h-44 w-full bg-slate-50 object-contain"
-                                                        onError={(event) => {
-                                                            event.currentTarget.style.display =
-                                                                'none';
-                                                        }}
-                                                    />
-                                                </div>
-                                            ))}
+                                            {detailImages.map(
+                                                (image, index) => (
+                                                    <div
+                                                        key={image.url}
+                                                        className="overflow-hidden rounded-md border border-slate-200 bg-slate-50"
+                                                    >
+                                                        <img
+                                                            src={image.url}
+                                                            alt={`attachment-${index + 1}`}
+                                                            className="h-44 w-full bg-slate-50 object-contain"
+                                                            onError={(
+                                                                event,
+                                                            ) => {
+                                                                event.currentTarget.style.display =
+                                                                    'none';
+                                                            }}
+                                                        />
+                                                        {image.labels.length >
+                                                        0 ? (
+                                                            <p className="border-t border-slate-200 bg-white px-2 py-1 text-[11px] leading-snug font-semibold text-slate-700">
+                                                                {image.labels.join(
+                                                                    ', ',
+                                                                )}
+                                                            </p>
+                                                        ) : null}
+                                                    </div>
+                                                ),
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="flex h-64 items-center justify-center rounded-md border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-400">
@@ -5052,6 +5176,10 @@ export default function Counter({
                                                 ชื่อลูกค้า:{' '}
                                                 {selectedOrder.details.customer
                                                     .name || '-'}
+                                                {selectedOrder.details.customer
+                                                    .phone
+                                                    ? ` · โทร ${selectedOrder.details.customer.phone}`
+                                                    : ''}
                                             </p>
                                             <p>
                                                 ประเภทงาน:{' '}
@@ -5060,15 +5188,32 @@ export default function Counter({
                                             </p>
                                             <p>
                                                 วันที่เปิดบิล:{' '}
-                                                {selectedOrder.details
-                                                    .billing_date || '-'}
+                                                {billDateText(
+                                                    selectedOrder.details
+                                                        .billing_date,
+                                                    true,
+                                                )}
                                             </p>
                                             <p>
                                                 วันที่รับสินค้า:{' '}
                                                 <span className="font-semibold text-[#E21E26]">
-                                                    {selectedOrder.details
-                                                        .due_date || '-'}
+                                                    {billDateText(
+                                                        selectedOrder.details
+                                                            .due_date,
+                                                    )}
                                                 </span>
+                                                {selectedOrder.details
+                                                    .postponed_from ? (
+                                                    <span className="ml-1 text-xs font-semibold text-amber-700">
+                                                        (เลื่อนจาก{' '}
+                                                        {thaiDate(
+                                                            selectedOrder
+                                                                .details
+                                                                .postponed_from,
+                                                        )}
+                                                        )
+                                                    </span>
+                                                ) : null}
                                             </p>
                                             <p>
                                                 ช่องทางติดต่อ:{' '}
@@ -5481,25 +5626,20 @@ export default function Counter({
                                                                         <td className="border border-slate-300 px-2.5 py-1 text-slate-800">
                                                                             รวมเงิน
                                                                         </td>
-                                                                        {matrix.houseAmounts.map(
+                                                                        {/* Each house's money is not repeated
+                                                                            under its column: the amount per size
+                                                                            is on the right, and the total stays at
+                                                                            the end. */}
+                                                                        {matrix.houses.map(
                                                                             (
-                                                                                amount,
-                                                                                index,
+                                                                                house,
                                                                             ) => (
                                                                                 <td
                                                                                     key={
-                                                                                        matrix
-                                                                                            .houses[
-                                                                                            index
-                                                                                        ]
-                                                                                            .name
+                                                                                        house.name
                                                                                     }
-                                                                                    className="border border-slate-300 px-2.5 py-1 text-right font-mono text-slate-900"
-                                                                                >
-                                                                                    {formatMoney(
-                                                                                        amount,
-                                                                                    )}
-                                                                                </td>
+                                                                                    className="border border-slate-300 px-2.5 py-1"
+                                                                                />
                                                                             ),
                                                                         )}
                                                                         <td
@@ -5809,9 +5949,49 @@ export default function Counter({
                                             timelineOrder?.due_date ?? '',
                                         )}
                                     </span>
+                                    {timelineOrder?.details?.postponed_from ? (
+                                        <span className="ml-1 text-xs font-semibold text-amber-700">
+                                            (เลื่อนจาก{' '}
+                                            {thaiDate(
+                                                timelineOrder.details
+                                                    .postponed_from,
+                                            )}
+                                            )
+                                        </span>
+                                    ) : null}
                                 </p>
                             </div>
                         </div>
+
+                        {(timelineOrder?.details?.due_date_changes ?? [])
+                            .length > 0 ? (
+                            <section className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+                                <h3 className="mb-2 text-sm font-bold text-amber-900">
+                                    ประวัติการเลื่อนส่ง
+                                </h3>
+                                <ol className="space-y-2">
+                                    {(
+                                        timelineOrder?.details
+                                            ?.due_date_changes ?? []
+                                    ).map((change, index) => (
+                                        <li
+                                            key={`${change.at}-${index}`}
+                                            className="rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-slate-700"
+                                        >
+                                            <p className="font-semibold text-slate-900">
+                                                {thaiDate(change.from)} →{' '}
+                                                {thaiDate(change.to)}
+                                            </p>
+                                            <p>เหตุผล: {change.reason}</p>
+                                            <p className="text-slate-500">
+                                                โดย {change.by} ·{' '}
+                                                {billDateText(change.at, true)}
+                                            </p>
+                                        </li>
+                                    ))}
+                                </ol>
+                            </section>
+                        ) : null}
 
                         <div className="space-y-3">
                             {[...(timelineOrder?.details?.routings ?? [])]
