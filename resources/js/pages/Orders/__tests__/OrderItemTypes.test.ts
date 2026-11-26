@@ -23,6 +23,7 @@ describe('order item garment types', () => {
         id: 'g1',
         team_name: 'คณะสีแดง',
         fabric_color_id: '1',
+        display_color: '',
         rows,
         artwork_files: [] as File[],
         saved_artwork: [] as { id: number; url: string }[],

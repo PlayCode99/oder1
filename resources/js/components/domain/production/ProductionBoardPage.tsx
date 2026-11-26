@@ -3,6 +3,7 @@ import JsBarcode from 'jsbarcode';
 import { ChevronDown, Printer } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import { labelArtworkGallery } from '@/components/domain/orders/artworkGallery';
 
 import { WorkReceiptTopBar } from '@/components/domain/orders/WorkReceiptHeader';
 import {
@@ -31,10 +32,15 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { resolveBranchHeaderColor } from '@/lib/branchHeaderColor';
+import { houseColorTheme, normalizeHouseColor } from '@/lib/houseColors';
+import { productionStyleLabel, stylesFor } from '@/pages/Orders/garmentTables';
 import {
-    DEFAULT_BRANCH_HEADER_COLOR,
-    resolveBranchHeaderColor,
-} from '@/lib/branchHeaderColor';
+    rosterGroupLine,
+    rosterSummary,
+    sortRoster,
+} from '@/pages/screenRoster';
+import { buildScreenRosterHtml } from '@/pages/screenRosterSheet';
 import type {
     CuttingTeam,
     EmbroideryTeam,
@@ -98,7 +104,7 @@ type ConfirmDialogState = {
 type ProductionGroupGarment = 'shirt' | 'pants';
 type ProductionGroupSizeTier = 'kids' | 'junior' | 'adults';
 /** Sleeve or leg length. 'unspecified' is for rows saved before we recorded it. */
-type ProductionGroupStyle = 'short' | 'long' | 'sleeveless' | 'unspecified';
+type ProductionGroupStyle = string;
 type ProductionGroupBaseKey =
     `${ProductionGroupGarment}_${ProductionGroupSizeTier}`;
 /** One batch, which is one printed sheet on the production floor. */
@@ -106,7 +112,20 @@ type ProductionGroupKey = `${ProductionGroupBaseKey}_${ProductionGroupStyle}`;
 type ProductionGroupTheme = {
     backgroundColor: string;
     borderColor: string;
+    /** Header text; white unless the ground is pale (a เหลือง or ขาว house). */
+    textColor?: string;
 };
+
+/** A sports-day house's sheet, painted in the colour picked for the house. */
+function houseSheetTheme(color: string): ProductionGroupTheme {
+    const theme = houseColorTheme(color);
+
+    return {
+        backgroundColor: theme.background,
+        borderColor: theme.border,
+        textColor: theme.text,
+    };
+}
 
 /**
  * Colour still says garment and size group, the way the floor already reads it.
@@ -169,26 +188,6 @@ const PRODUCTION_UNSPECIFIED_THEME: ProductionGroupTheme = {
     borderColor: '#334155',
 };
 
-const PRODUCTION_STYLE_LABELS: Record<
-    ProductionGroupGarment,
-    Record<ProductionGroupStyle, string>
-> = {
-    shirt: {
-        short: 'แขนสั้น',
-        long: 'แขนยาว',
-        sleeveless: 'แขนกุด',
-        unspecified: 'ไม่ระบุแขน',
-    },
-    // Trousers are never sleeveless, so the label would name a sheet that
-    // cannot exist. It is spelled out rather than left missing.
-    pants: {
-        short: 'ขาสั้น',
-        long: 'ขายาว',
-        sleeveless: 'ขาสั้น',
-        unspecified: 'ไม่ระบุขา',
-    },
-};
-
 const PRODUCTION_GROUP_BASE_LABELS: Record<ProductionGroupBaseKey, string> = {
     shirt_kids: 'เสื้อไซต์เด็ก',
     shirt_junior: 'เสื้อไซต์ประถม - มัธยมต้น',
@@ -199,22 +198,30 @@ const PRODUCTION_GROUP_BASE_LABELS: Record<ProductionGroupBaseKey, string> = {
 };
 
 /**
- * The lengths a garment can be cut in, and so the sheets it can print. A pair
- * of trousers is never sleeveless.
+ * The lengths a garment can be cut in, and so the sheets it can print — the
+ * shop's own list, plus the catch-all for lines recorded before lengths were.
  */
 function productionStylesFor(
     garment: ProductionGroupGarment,
 ): readonly ProductionGroupStyle[] {
-    return garment === 'pants'
-        ? (['short', 'long', 'unspecified'] as const)
-        : (['short', 'long', 'sleeveless', 'unspecified'] as const);
+    return [...stylesFor(garment), 'unspecified'];
 }
 
+/**
+ * The length a line was sold at, as a sheet key.
+ *
+ * This used to recognise exactly three words, so the first length the shop
+ * added itself was filed as "ไม่ระบุแขน" — a bill of thirty three-quarter
+ * sleeves printed a sheet that would not say what to cut.
+ */
 function normalizeProductionStyle(
     style: string | null | undefined,
 ): ProductionGroupStyle {
-    return style === 'short' || style === 'long' || style === 'sleeveless'
-        ? style
+    const code = (style ?? '').trim();
+
+    return code !== '' &&
+        (stylesFor('shirt').includes(code) || stylesFor('pants').includes(code))
+        ? code
         : 'unspecified';
 }
 const PRODUCTION_ARTWORK_CONTAINER_HEIGHT = '70mm';
@@ -313,15 +320,127 @@ function readGarmentAvailability(order: Order): {
 type PersonalizationPrintRow = {
     name: string;
     number: string;
+    /**
+     * 'kids' or 'adults'. Optional because a row can be built without it —
+     * the order treats anything that is not 'kids' as adults' anyway.
+     */
+    size_group?: string;
+    /** The lengths, absent on a bill saved before lengths were recorded. */
+    shirt_style?: string;
+    pants_style?: string;
     size: string;
     quantity: number;
+    /** The person's trousers, '-' and 0 when they ordered none. */
+    pants_size: string;
+    pants_number: string;
+    pants_quantity: number;
 };
+
+/**
+ * A date the way the counter writes it: day/month/Buddhist year, 04/10/2569.
+ *
+ * Only the date part of the value is read. The server keeps the shop's wall
+ * clock under a UTC label, so 20:35 on the 4th arrives as 2026-10-04T20:35Z —
+ * reading that through the browser's clock would move an evening bill to the
+ * next day.
+ */
+export function counterDate(value: string | null | undefined): string {
+    const match = (value ?? '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+
+    if (!match) {
+        return '-';
+    }
+
+    const [, year, month, day] = match;
+
+    return `${day}/${month}/${Number(year) + 543}`;
+}
+
+/**
+ * The one picture a sheet with none of its own may still show: a picture
+ * attached for every sheet of its garment, or the bill's general artwork.
+ * Never a picture pinned to another sheet — showing a sheet someone else's
+ * picture is worse than showing it none.
+ */
+export function sharedArtworkUrl(
+    order: Pick<
+        Order,
+        | 'artwork_url'
+        | 'shirt_artwork_url'
+        | 'pants_artwork_url'
+        | 'shirt_artwork_media'
+        | 'pants_artwork_media'
+    >,
+    garment: ProductionGroupGarment,
+): string | null {
+    const media =
+        garment === 'shirt'
+            ? order.shirt_artwork_media
+            : order.pants_artwork_media;
+    const general = order.artwork_url?.trim() || null;
+
+    if (media) {
+        return media.find((item) => !item.batch)?.url?.trim() || general;
+    }
+
+    // A payload without batches predates pinning, when every picture was
+    // meant for every sheet.
+    const first =
+        garment === 'shirt' ? order.shirt_artwork_url : order.pants_artwork_url;
+
+    return first?.trim() || general;
+}
+
+/**
+ * Whether a name list carries trousers at all. Only then does the roster give
+ * them columns: a shirts-only list prints exactly as it always has.
+ */
+export function rosterHasPants(rows: PersonalizationPrintRow[]): boolean {
+    return rows.some((row) => row.pants_quantity > 0);
+}
 
 /**
  * The name list a Form 2 bill carries. It lives in the spec JSON because
  * order_items has no column for a person, and the dialog needs it in two
  * places: the sheet itself, and the header that offers to print the sheet.
  */
+/** The colour a Form 2 bill dresses its keeper in, '' when it names none. */
+/**
+ * A spec value too long to sit in a third of the row.
+ *
+ * The spec grid gives each field a third of the page, which suits a colour or
+ * a pattern name. A typed note — "รายละเอียดเพิ่มเติม" and its like — runs to
+ * a sentence or more, and in a third of the row it wraps into a tall narrow
+ * column between two dividing lines, which is what made it unreadable. Past
+ * this length the field takes the whole row.
+ */
+export function isLongSpecValue(
+    value: string | number | null | undefined,
+): boolean {
+    return String(value ?? '').trim().length > 36;
+}
+
+function readKeeperColor(order: Order): string {
+    const raw = order.specification?.screen_print_detail;
+
+    if (!raw || typeof raw !== 'string') {
+        return '';
+    }
+
+    try {
+        const firstPass = JSON.parse(raw) as unknown;
+        const parsed = (
+            typeof firstPass === 'string' ? JSON.parse(firstPass) : firstPass
+        ) as { individual_keeper_color?: unknown };
+
+        return typeof parsed.individual_keeper_color === 'string'
+            ? parsed.individual_keeper_color.trim()
+            : '';
+    } catch {
+        return '';
+    }
+}
+
 function readPersonalizationRows(order: Order): PersonalizationPrintRow[] {
     const raw = order.specification?.screen_print_detail;
 
@@ -338,8 +457,14 @@ function readPersonalizationRows(order: Order): PersonalizationPrintRow[] {
             personalization_rows?: Array<{
                 name?: unknown;
                 number?: unknown;
+                size_group?: unknown;
+                shirt_style?: unknown;
+                pants_style?: unknown;
                 size?: unknown;
                 quantity?: unknown;
+                pants_size?: unknown;
+                pants_number?: unknown;
+                pants_quantity?: unknown;
             }>;
         };
 
@@ -358,15 +483,35 @@ function readPersonalizationRows(order: Order): PersonalizationPrintRow[] {
         return parsed.personalization_rows
             .map((row) => {
                 const quantity = Number(row.quantity ?? 0);
+                const pantsQuantity = Number(row.pants_quantity ?? 0);
+                const hasPants =
+                    Number.isFinite(pantsQuantity) && pantsQuantity > 0;
 
                 return {
                     name: text(row.name),
                     number: text(row.number),
+                    size_group: row.size_group === 'kids' ? 'kids' : 'adults',
+                    // The sheet puts the short sleeves before the long ones
+                    // and names the length when a bill mixes them, so the
+                    // length has to be carried rather than dropped here.
+                    shirt_style:
+                        typeof row.shirt_style === 'string'
+                            ? row.shirt_style
+                            : undefined,
+                    pants_style:
+                        typeof row.pants_style === 'string'
+                            ? row.pants_style
+                            : undefined,
                     size: text(row.size),
                     quantity:
                         Number.isFinite(quantity) && quantity > 0
                             ? quantity
                             : 0,
+                    // A person who ordered no trousers has none to size or
+                    // number, whatever the row happens to carry.
+                    pants_size: hasPants ? text(row.pants_size) : '-',
+                    pants_number: hasPants ? text(row.pants_number) : '-',
+                    pants_quantity: hasPants ? pantsQuantity : 0,
                 };
             })
             .filter(
@@ -389,7 +534,15 @@ function resolveProductionGroupTheme(
         return PRODUCTION_UNSPECIFIED_THEME;
     }
 
-    return PRODUCTION_GROUP_THEME_MAP[baseKey][style];
+    const family = PRODUCTION_GROUP_THEME_MAP[baseKey];
+    const shades: Record<string, ProductionGroupTheme | undefined> = family;
+
+    // Colour says garment and size group; length only picks the shade. A
+    // length the shop added itself has no shade of its own, so it keeps its
+    // family's primary one rather than falling to the neutral grey, which the
+    // floor reads as a sheet whose length nobody wrote down. The heading
+    // always spells the length out, so the shade is never the only signal.
+    return shades[style] ?? family.short;
 }
 
 type SpecRowList = Array<{
@@ -427,7 +580,7 @@ function resolveGroupHeaderStyle(theme: ProductionGroupTheme): CSSProperties {
     return {
         backgroundColor: theme.backgroundColor,
         borderColor: theme.borderColor,
-        color: '#ffffff',
+        color: theme.textColor ?? '#ffffff',
     };
 }
 
@@ -555,7 +708,7 @@ const shirtSpecFields: SpecField[] = [
         key: 'neck_style_id',
         label: 'แบบคอ',
         type: 'catalog',
-        storageKeys: ['jssport.shirt-collars'],
+        storageKeys: ['jssport.shirt-neck-styles', 'jssport.shirt-collars'],
     },
     {
         key: 'neck_color_id',
@@ -616,7 +769,7 @@ const shirtSpecFields: SpecField[] = [
     { key: 'stripe_style_text', label: 'แบบลา', type: 'text' },
     { key: 'screen_text', label: 'ข้อความสกรีน', type: 'text' },
     { key: 'embroidery_code_text', label: 'รหัสงานปัก', type: 'text' },
-    { key: 'embroidery_note_text', label: 'รายละเอียดปัก', type: 'text' },
+    { key: 'embroidery_note_text', label: 'รายละเอียดเพิ่มเติม', type: 'text' },
 ];
 
 const pantsSpecFields: SpecField[] = [
@@ -673,7 +826,7 @@ const pantsSpecFields: SpecField[] = [
     { key: 'stripe_style_text', label: 'แบบลา', type: 'text' },
     { key: 'screen_text', label: 'ข้อความสกรีน', type: 'text' },
     { key: 'embroidery_code_text', label: 'รหัสงานปัก', type: 'text' },
-    { key: 'embroidery_note_text', label: 'รายละเอียดปัก', type: 'text' },
+    { key: 'embroidery_note_text', label: 'รายละเอียดเพิ่มเติม', type: 'text' },
 ];
 
 const PROCESS_TABLE_COLUMN_WIDTHS = {
@@ -1212,17 +1365,17 @@ export function ProductionBoardPage({
         return 'งานเข้าใหม่';
     };
 
-    const dateOnly = (value: string | null | undefined): string => {
-        if (!value) {
-            return '-';
-        }
+    const dateOnly = (value: string | null | undefined): string =>
+        counterDate(value);
 
-        const normalized = value.includes('T')
-            ? value.split('T')[0]
-            : value.split(' ')[0];
-
-        return normalized || '-';
-    };
+    // A sheet printed before a postponement shows the old day, so the new
+    // one carries where it moved from.
+    const dueDateWithNote = (
+        order: Pick<Order, 'due_date' | 'postponed_from'>,
+    ): string =>
+        order.postponed_from
+            ? `${counterDate(order.due_date)} (เลื่อนจาก ${counterDate(order.postponed_from)})`
+            : counterDate(order.due_date);
 
     const dateTime = (value: string | null | undefined): string => {
         if (!value) {
@@ -1363,8 +1516,7 @@ export function ProductionBoardPage({
         }
 
         const branchHeaderColor = resolveBranchHeaderColor(
-            detailOrder.branch?.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
+            detailOrder.branch?.header_color,
         );
 
         const printWindow = window.open('', '_blank', 'width=1200,height=900');
@@ -1378,7 +1530,13 @@ export function ProductionBoardPage({
                 <head>
                     <title>${title} ${detailOrder.order_code}</title>
                     <style>
-                        @page { size: A4 landscape; margin: 5mm; }
+                        /* The group sheets are laid out across the page and
+                           need its width. The name list is a narrow column of
+                           people, so it prints upright — the same way the
+                           counter prints the customer's copy, which is what
+                           the floor checks it against. */
+                        @page { size: A4 ${scope === 'roster' ? 'portrait' : 'landscape'}; margin: 5mm; }
+                        ${scope === 'roster' ? '.p-print-page-flow { min-height: 275mm; }' : ''}
                         * { box-sizing: border-box; }
                         body { font-family: "Noto Sans Thai", Arial, sans-serif; margin: 0; padding: 0; color: #0f172a; font-size: 13px; }
                         .p-sheet { width: 100%; }
@@ -1538,7 +1696,53 @@ export function ProductionBoardPage({
 
     const handlePrintDocument = () => printSheets('all', 'ใบรับงาน');
 
-    const handlePrintRoster = () => printSheets('roster', 'ใบรายชื่อสกรีน');
+    /**
+     * The floor's name list is the counter's name list. Built by the same
+     * module rather than cloned out of this page's own sheet, so the copy the
+     * customer signs and the copy at the press cannot differ by a column, an
+     * order or a total — which is the whole point of checking one against the
+     * other at handover.
+     */
+    const handlePrintRoster = () => {
+        if (!detailOrder) {
+            return;
+        }
+
+        const people = readPersonalizationRows(detailOrder);
+
+        if (people.length === 0) {
+            return;
+        }
+
+        const html = buildScreenRosterHtml({
+            orderCode: detailOrder.order_code,
+            jobName: detailOrder.job_name ?? '',
+            customerName: detailOrder.customer?.customer_name ?? '',
+            customerPhone: detailOrder.customer?.phone ?? null,
+            branchName: detailOrder.branch?.branch_name ?? '',
+            branchPhone: detailOrder.branch?.phone ?? null,
+            branchHeaderColor: resolveBranchHeaderColor(
+                detailOrder.branch?.header_color,
+            ),
+            dueDateLabel: counterDate(detailOrder.due_date),
+            postponedFromLabel: detailOrder.postponed_from
+                ? counterDate(detailOrder.postponed_from)
+                : null,
+            keeperColor: readKeeperColor(detailOrder),
+            barcodeMarkup: createOrderCodeBarcodeSvg(detailOrder.order_code),
+            people,
+        });
+
+        const printWindow = window.open('', '_blank', 'width=900,height=1100');
+
+        if (!printWindow) {
+            return;
+        }
+
+        printWindow.document.write(html);
+        printWindow.document.close();
+        printWindow.focus();
+    };
 
     const resolveCsrfToken = (): string | null => {
         const metaToken = document
@@ -2993,15 +3197,18 @@ export function ProductionBoardPage({
                                     ...mappedPantsRows,
                                     ...explicitPantsRows,
                                 ];
-                                const images = [
-                                    detailOrder.artwork_url,
-                                    ...(detailOrder.shirt_artwork_urls ?? []),
-                                    ...(detailOrder.pants_artwork_urls ?? []),
-                                    ...(detailOrder.reference_designs ?? []),
-                                ].filter((url): url is string => Boolean(url));
                                 const orderItems = detailOrder.items ?? [];
-                                const personalizationRows =
-                                    readPersonalizationRows(detailOrder);
+                                // Kids before adults, small sizes before
+                                // large, numbers running up — the same order
+                                // the counter's copy is read in, so the press
+                                // and the counter never hold two orders.
+                                const personalizationRows = sortRoster(
+                                    readPersonalizationRows(detailOrder),
+                                );
+                                const rosterCounts =
+                                    rosterSummary(personalizationRows);
+                                const withPants =
+                                    rosterHasPants(personalizationRows);
                                 const isIndividualOrder =
                                     personalizationRows.length > 0;
 
@@ -3029,6 +3236,7 @@ export function ProductionBoardPage({
                                             mode?: unknown;
                                             sports_day_groups?: Array<{
                                                 team_name?: unknown;
+                                                display_color?: unknown;
                                                 rows?: Array<
                                                     Record<string, unknown>
                                                 >;
@@ -3053,17 +3261,31 @@ export function ProductionBoardPage({
                                                         ''
                                                         ? group.team_name.trim()
                                                         : `คณะที่ ${index + 1}`,
+                                                displayColor:
+                                                    normalizeHouseColor(
+                                                        group.display_color,
+                                                    ),
                                                 rows: (Array.isArray(group.rows)
                                                     ? group.rows
                                                     : []
                                                 ).map((row) => ({
                                                     sizeGroup:
-                                                        String(
-                                                            row.size_group ??
-                                                                'adults',
-                                                        ) === 'kids'
-                                                            ? ('kids' as const)
-                                                            : ('adults' as const),
+                                                        ((): ProductionGroupSizeTier => {
+                                                            // A ประถม - มัธยมต้น row is its own sheet; rows saved before that
+                                                            // range existed say kids or adults.
+                                                            const value =
+                                                                String(
+                                                                    row.size_group ??
+                                                                        'adults',
+                                                                );
+
+                                                            return value ===
+                                                                'kids' ||
+                                                                value ===
+                                                                    'junior'
+                                                                ? value
+                                                                : 'adults';
+                                                        })(),
                                                     sizeLabel: String(
                                                         row.size_label ?? '',
                                                     ).trim(),
@@ -3082,6 +3304,29 @@ export function ProductionBoardPage({
                                         return [];
                                     }
                                 })();
+
+                                // Every picture on the bill, once, each with the sheets it is
+                                // on — a colour house's and an old ชุดพละ table's included,
+                                // which this overview used to leave out.
+                                const images = labelArtworkGallery(
+                                    detailOrder.artwork_gallery,
+                                    [
+                                        detailOrder.artwork_url,
+                                        ...(detailOrder.shirt_artwork_urls ??
+                                            []),
+                                        ...(detailOrder.pants_artwork_urls ??
+                                            []),
+                                        ...Object.values(
+                                            detailOrder.sports_day_artwork_urls ??
+                                                {},
+                                        ).flat(),
+                                        ...(detailOrder.reference_designs ??
+                                            []),
+                                    ],
+                                    sportsDayGroups.map(
+                                        (group) => group.teamName,
+                                    ),
+                                );
                                 const isSportsDayOrder =
                                     sportsDayGroups.length > 0;
                                 const adultSizeHeaders = [
@@ -3290,7 +3535,7 @@ export function ProductionBoardPage({
                                                 return {
                                                     key: `${baseKey}_${style}` as ProductionGroupKey,
                                                     baseKey,
-                                                    label: `${PRODUCTION_GROUP_BASE_LABELS[baseKey]} ${PRODUCTION_STYLE_LABELS[garment][style]}`,
+                                                    label: `${PRODUCTION_GROUP_BASE_LABELS[baseKey]} ${productionStyleLabel(garment, style)}`,
                                                     garment,
                                                     // Which sheet this prints...
                                                     sizeTier,
@@ -3454,7 +3699,11 @@ export function ProductionBoardPage({
                                         (['shirt', 'pants'] as const).flatMap(
                                             (garment) =>
                                                 (
-                                                    ['kids', 'adults'] as const
+                                                    [
+                                                        'kids',
+                                                        'junior',
+                                                        'adults',
+                                                    ] as const
                                                 ).flatMap((sizeGroup) => {
                                                     const rows =
                                                         team.rows.filter(
@@ -3516,16 +3765,18 @@ export function ProductionBoardPage({
                                                             definitionKey,
                                                             definitionKey,
                                                         );
-                                                    const garmentLabel =
-                                                        garment === 'pants'
-                                                            ? sizeGroup ===
-                                                              'kids'
-                                                                ? 'กางเกงเด็ก'
-                                                                : 'กางเกงผู้ใหญ่'
-                                                            : sizeGroup ===
-                                                                'kids'
-                                                              ? 'เสื้อไซต์เด็ก'
-                                                              : 'เสื้อไซต์ผู้ใหญ่';
+                                                    const garmentLabel = {
+                                                        shirt: {
+                                                            kids: 'เสื้อไซต์เด็ก',
+                                                            junior: 'เสื้อไซต์ประถม - มัธยมต้น',
+                                                            adults: 'เสื้อไซต์ผู้ใหญ่',
+                                                        },
+                                                        pants: {
+                                                            kids: 'กางเกงเด็ก',
+                                                            junior: 'กางเกงประถม - มัธยมต้น',
+                                                            adults: 'กางเกงผู้ใหญ่',
+                                                        },
+                                                    }[garment][sizeGroup];
 
                                                     return [
                                                         {
@@ -3535,8 +3786,14 @@ export function ProductionBoardPage({
                                                                 team.teamName,
                                                             garment,
                                                             sizeTier: sizeGroup,
+                                                            // A ประถม - มัธยมต้น
+                                                            // house sheet is its
+                                                            // own page, paid at
+                                                            // the child's rate.
                                                             pricingGroup:
-                                                                sizeGroup,
+                                                                pricingGroupFor(
+                                                                    sizeGroup,
+                                                                ),
                                                             quantity,
                                                             sizeRows:
                                                                 Array.from(
@@ -3614,16 +3871,21 @@ export function ProductionBoardPage({
                                                                         '',
                                                             ),
                                                             artworkUrl:
-                                                                (garment ===
-                                                                'shirt'
-                                                                    ? detailOrder.shirt_artwork_url?.trim()
-                                                                    : detailOrder.pants_artwork_url?.trim()) ||
-                                                                detailOrder.artwork_url?.trim() ||
-                                                                null,
-                                                            theme: resolveProductionGroupTheme(
-                                                                definitionKey,
-                                                                'short',
-                                                            ),
+                                                                sharedArtworkUrl(
+                                                                    detailOrder,
+                                                                    garment,
+                                                                ),
+                                                            // The house's own colour when one was
+                                                            // picked; otherwise garment and size, as
+                                                            // every other sheet is coloured.
+                                                            theme: team.displayColor
+                                                                ? houseSheetTheme(
+                                                                      team.displayColor,
+                                                                  )
+                                                                : resolveProductionGroupTheme(
+                                                                      definitionKey,
+                                                                      'short',
+                                                                  ),
                                                             specTitle:
                                                                 resolveProductionSpecTitle(
                                                                     garment,
@@ -3666,29 +3928,11 @@ export function ProductionBoardPage({
                                                   unitTotal * quantity;
                                               const resolveGroupArtworkUrl = (
                                                   garment: ProductionGroupGarment,
-                                              ): string | null => {
-                                                  const normalizedShirtArtwork =
-                                                      detailOrder.shirt_artwork_url?.trim() ||
-                                                      null;
-                                                  const normalizedPantsArtwork =
-                                                      detailOrder.pants_artwork_url?.trim() ||
-                                                      null;
-                                                  const normalizedGeneralArtwork =
-                                                      detailOrder.artwork_url?.trim() ||
-                                                      null;
-
-                                                  if (garment === 'shirt') {
-                                                      return (
-                                                          normalizedShirtArtwork ??
-                                                          normalizedGeneralArtwork
-                                                      );
-                                                  }
-
-                                                  return (
-                                                      normalizedPantsArtwork ??
-                                                      normalizedGeneralArtwork
+                                              ): string | null =>
+                                                  sharedArtworkUrl(
+                                                      detailOrder,
+                                                      garment,
                                                   );
-                                              };
                                               /**
                                                * Every artwork attached for this garment, not just the first.
                                                * The singular *_artwork_url fields only ever hold one image,
@@ -4057,6 +4301,13 @@ export function ProductionBoardPage({
                                                 font-size: 11px;
                                                 color: #64748b;
                                             }
+                                            .p-image-places {
+                                                margin: 2px 2px 0;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                line-height: 1.35;
+                                                color: #334155;
+                                            }
                                             .p-image-empty {
                                                 display: flex;
                                                 align-items: center;
@@ -4230,6 +4481,22 @@ export function ProductionBoardPage({
                                                it flows and breaks across pages rather than being
                                                cut off at the height of a single sheet. It stays a
                                                flex column so a short list still fills its page. */
+                                            .p-roster-counts {
+                                                display: flex;
+                                                flex-wrap: wrap;
+                                                gap: 1.5mm 2.5mm;
+                                                font-size: 12px;
+                                            }
+                                            .p-roster-count {
+                                                border: 0.3mm solid #cbd5e1;
+                                                border-radius: 1mm;
+                                                padding: 0.5mm 2mm;
+                                                background: #f8fafc;
+                                            }
+                                            .p-roster-count-total {
+                                                border-color: #0f172a;
+                                                font-weight: 700;
+                                            }
                                             .p-print-page-flow {
                                                 height: auto;
                                                 min-height: 195mm;
@@ -4304,16 +4571,29 @@ export function ProductionBoardPage({
                                                 td:nth-child(4),
                                             .p-personalization-table
                                                 tbody
-                                                td:nth-child(5) {
+                                                td:nth-child(5),
+                                            .p-personalization-table
+                                                tbody
+                                                td:nth-child(n + 6) {
                                                 text-align: center;
                                                 font-variant-numeric: tabular-nums;
                                             }
+                                            /* Trousers size and number read like the
+                                               shirt's beside them. */
                                             .p-personalization-table
                                                 tbody
                                                 td:nth-child(3),
                                             .p-personalization-table
                                                 tbody
-                                                td:nth-child(4) {
+                                                td:nth-child(4),
+                                            .p-personalization-table
+                                                tbody
+                                                tr:not(.p-roster-total)
+                                                td:nth-child(6),
+                                            .p-personalization-table
+                                                tbody
+                                                tr:not(.p-roster-total)
+                                                td:nth-child(7) {
                                                 font-weight: 700;
                                             }
                                             .p-roster-index {
@@ -4329,6 +4609,9 @@ export function ProductionBoardPage({
                                                 font-weight: 800;
                                                 text-align: right;
                                             }
+                                            .p-personalization-table
+                                                .p-roster-total
+                                                td:not(:first-child),
                                             .p-personalization-table
                                                 .p-roster-total
                                                 td:last-child {
@@ -4599,6 +4882,16 @@ export function ProductionBoardPage({
                                             .p-spec-grid-item:nth-child(3n) {
                                                 border-right: 0;
                                             }
+                                            /* A free-text note does not fit a third of the
+                                               row. Squeezed into one it wrapped to five or
+                                               six lines against neighbours one line tall,
+                                               and read as a column of text crushed between
+                                               two rules. It takes the whole row instead,
+                                               with no divider beside it to crush it. */
+                                            .p-spec-grid-item.is-wide {
+                                                grid-column: 1 / -1;
+                                                border-right: 0;
+                                            }
                                             .p-spec-grid-label {
                                                 flex: none;
                                                 font-size: 10px;
@@ -4805,8 +5098,8 @@ export function ProductionBoardPage({
                                                                     วันที่รับสินค้า
                                                                 </p>
                                                                 <p className="text-sm font-bold text-red-700">
-                                                                    {dateOnly(
-                                                                        detailOrder.due_date,
+                                                                    {dueDateWithNote(
+                                                                        detailOrder,
                                                                     )}
                                                                 </p>
                                                             </div>
@@ -4903,14 +5196,16 @@ export function ProductionBoardPage({
                                                             <div className="p-image-grid">
                                                                 {images.map(
                                                                     (
-                                                                        imageUrl,
+                                                                        image,
                                                                         index,
                                                                     ) => (
                                                                         <a
-                                                                            key={`${imageUrl}-${index}`}
+                                                                            key={
+                                                                                image.url
+                                                                            }
                                                                             className="p-image-card"
                                                                             href={
-                                                                                imageUrl
+                                                                                image.url
                                                                             }
                                                                             target="_blank"
                                                                             rel="noopener noreferrer"
@@ -4919,7 +5214,7 @@ export function ProductionBoardPage({
                                                                             <div className="p-image-wrap">
                                                                                 <img
                                                                                     src={
-                                                                                        imageUrl
+                                                                                        image.url
                                                                                     }
                                                                                     alt={`รูปแนบที่ ${index + 1}`}
                                                                                     loading="lazy"
@@ -4935,6 +5230,16 @@ export function ProductionBoardPage({
                                                                                     ดูเต็มจอ
                                                                                 </span>
                                                                             </div>
+                                                                            {image
+                                                                                .labels
+                                                                                .length >
+                                                                            0 ? (
+                                                                                <p className="p-image-places">
+                                                                                    {image.labels.join(
+                                                                                        ', ',
+                                                                                    )}
+                                                                                </p>
+                                                                            ) : null}
                                                                         </a>
                                                                     ),
                                                                 )}
@@ -5121,6 +5426,11 @@ export function ProductionBoardPage({
                                                                                 group
                                                                                     .theme
                                                                                     .borderColor,
+                                                                            color:
+                                                                                group
+                                                                                    .theme
+                                                                                    .textColor ??
+                                                                                '#ffffff',
                                                                         }}
                                                                         className="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
                                                                         title={`ไปที่ใบงาน ${group.label}`}
@@ -5479,8 +5789,8 @@ export function ProductionBoardPage({
                                                                                           วันที่รับสินค้า:
                                                                                       </span>{' '}
                                                                                       <strong>
-                                                                                          {dateOnly(
-                                                                                              detailOrder.due_date,
+                                                                                          {dueDateWithNote(
+                                                                                              detailOrder,
                                                                                           )}
                                                                                       </strong>
                                                                                   </p>
@@ -5701,7 +6011,13 @@ export function ProductionBoardPage({
                                                                                               ) => (
                                                                                                   <div
                                                                                                       key={`${group.key}-${specRow.label}`}
-                                                                                                      className="p-spec-grid-item"
+                                                                                                      className={
+                                                                                                          isLongSpecValue(
+                                                                                                              specRow.value,
+                                                                                                          )
+                                                                                                              ? 'p-spec-grid-item is-wide'
+                                                                                                              : 'p-spec-grid-item'
+                                                                                                      }
                                                                                                   >
                                                                                                       <span className="p-spec-grid-label">
                                                                                                           {
@@ -6009,8 +6325,8 @@ export function ProductionBoardPage({
                                                                             วันที่รับสินค้า:
                                                                         </span>{' '}
                                                                         <strong>
-                                                                            {dateOnly(
-                                                                                detailOrder.due_date,
+                                                                            {dueDateWithNote(
+                                                                                detailOrder,
                                                                             )}
                                                                         </strong>
                                                                     </p>
@@ -6033,6 +6349,36 @@ export function ProductionBoardPage({
                                                             </div>
                                                         </header>
 
+                                                        {/* What to pull before a shirt is printed:
+                                                            how many of each size each group takes,
+                                                            and what the sheet comes to. */}
+                                                        {rosterCounts.groups
+                                                            .length > 0 ? (
+                                                            <div className="p-roster-counts">
+                                                                {rosterCounts.groups.map(
+                                                                    (group) => (
+                                                                        <span
+                                                                            key={
+                                                                                group.group
+                                                                            }
+                                                                            className="p-roster-count"
+                                                                        >
+                                                                            {rosterGroupLine(
+                                                                                group,
+                                                                            )}
+                                                                        </span>
+                                                                    ),
+                                                                )}
+                                                                <span className="p-roster-count p-roster-count-total">
+                                                                    รวมทั้งหมด{' '}
+                                                                    {rosterCounts.total.toLocaleString(
+                                                                        'th-TH',
+                                                                    )}{' '}
+                                                                    ตัว
+                                                                </span>
+                                                            </div>
+                                                        ) : null}
+
                                                         <div className="p-roster-card">
                                                             <table className="p-personalization-table">
                                                                 <colgroup>
@@ -6044,19 +6390,44 @@ export function ProductionBoardPage({
                                                                     <col />
                                                                     <col
                                                                         style={{
-                                                                            width: '30mm',
+                                                                            width: withPants
+                                                                                ? '17mm'
+                                                                                : '30mm',
                                                                         }}
                                                                     />
                                                                     <col
                                                                         style={{
-                                                                            width: '30mm',
+                                                                            width: withPants
+                                                                                ? '17mm'
+                                                                                : '30mm',
                                                                         }}
                                                                     />
                                                                     <col
                                                                         style={{
-                                                                            width: '30mm',
+                                                                            width: withPants
+                                                                                ? '17mm'
+                                                                                : '30mm',
                                                                         }}
                                                                     />
+                                                                    {withPants ? (
+                                                                        <>
+                                                                            <col
+                                                                                style={{
+                                                                                    width: '19mm',
+                                                                                }}
+                                                                            />
+                                                                            <col
+                                                                                style={{
+                                                                                    width: '19mm',
+                                                                                }}
+                                                                            />
+                                                                            <col
+                                                                                style={{
+                                                                                    width: '19mm',
+                                                                                }}
+                                                                            />
+                                                                        </>
+                                                                    ) : null}
                                                                 </colgroup>
                                                                 <thead>
                                                                     <tr>
@@ -6073,8 +6444,23 @@ export function ProductionBoardPage({
                                                                             ไซซ์
                                                                         </th>
                                                                         <th>
-                                                                            จำนวน
+                                                                            {withPants
+                                                                                ? 'จำนวนเสื้อ'
+                                                                                : 'จำนวน'}
                                                                         </th>
+                                                                        {withPants ? (
+                                                                            <>
+                                                                                <th>
+                                                                                    ไซซ์กางเกง
+                                                                                </th>
+                                                                                <th>
+                                                                                    เบอร์กางเกง
+                                                                                </th>
+                                                                                <th>
+                                                                                    จำนวนกางเกง
+                                                                                </th>
+                                                                            </>
+                                                                        ) : null}
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
@@ -6110,6 +6496,26 @@ export function ProductionBoardPage({
                                                                                         row.quantity
                                                                                     }
                                                                                 </td>
+                                                                                {withPants ? (
+                                                                                    <>
+                                                                                        <td>
+                                                                                            {
+                                                                                                row.pants_size
+                                                                                            }
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            {
+                                                                                                row.pants_number
+                                                                                            }
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            {row.pants_quantity >
+                                                                                            0
+                                                                                                ? row.pants_quantity
+                                                                                                : '-'}
+                                                                                        </td>
+                                                                                    </>
+                                                                                ) : null}
                                                                             </tr>
                                                                         ),
                                                                     )}
@@ -6153,6 +6559,19 @@ export function ProductionBoardPage({
                                                                                 <td>
                                                                                     &nbsp;
                                                                                 </td>
+                                                                                {withPants ? (
+                                                                                    <>
+                                                                                        <td>
+                                                                                            &nbsp;
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            &nbsp;
+                                                                                        </td>
+                                                                                        <td>
+                                                                                            &nbsp;
+                                                                                        </td>
+                                                                                    </>
+                                                                                ) : null}
                                                                             </tr>
                                                                         ),
                                                                     )}
@@ -6175,6 +6594,26 @@ export function ProductionBoardPage({
                                                                                 0,
                                                                             )}
                                                                         </td>
+                                                                        {withPants ? (
+                                                                            <>
+                                                                                <td
+                                                                                    colSpan={
+                                                                                        2
+                                                                                    }
+                                                                                />
+                                                                                <td>
+                                                                                    {personalizationRows.reduce(
+                                                                                        (
+                                                                                            sum,
+                                                                                            row,
+                                                                                        ) =>
+                                                                                            sum +
+                                                                                            row.pants_quantity,
+                                                                                        0,
+                                                                                    )}
+                                                                                </td>
+                                                                            </>
+                                                                        ) : null}
                                                                     </tr>
                                                                 </tbody>
                                                             </table>
@@ -6257,7 +6696,9 @@ export function ProductionBoardPage({
                                 <p>
                                     กำหนดส่ง:{' '}
                                     <span className="font-semibold text-slate-900">
-                                        {dateOnly(timelineOrder?.due_date)}
+                                        {timelineOrder
+                                            ? dueDateWithNote(timelineOrder)
+                                            : '-'}
                                     </span>
                                 </p>
                             </div>

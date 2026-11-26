@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import Counter from '@/pages/Counter';
@@ -409,10 +409,82 @@ describe('a Form 1 bill on the printed receipt', () => {
             }),
         );
 
-        expect(html).toContain('ขนาดเด็ก · อนุบาล/ประถม');
-        expect(html).toContain('ขนาดผู้ใหญ่ · มัธยมต้น/มัธยมปลาย');
+        expect(html).toContain('ขนาดเด็ก');
+        expect(html).toContain('ขนาดผู้ใหญ่');
         // Four tables: a shirt and a trouser list per size group.
         expect(printedTables(html)).toHaveLength(4);
+    });
+
+    it('keeps ประถม - มัธยมต้น in a table of its own, between kids and adults', () => {
+        const html = printedHtml(
+            garmentBill({
+                form_mode: 'pe_uniform',
+                items: [
+                    ...garmentItems,
+                    {
+                        item_type: 'separate_shirt',
+                        size_group: 'kids',
+                        size_tier: 'junior',
+                        size_label: 'JL',
+                        shirt_style: 'short',
+                        quantity: 6,
+                        unit_price: 110,
+                        total_price: 660,
+                    },
+                    {
+                        item_type: 'separate_shirt',
+                        size_group: 'kids',
+                        size_tier: 'kids',
+                        size_label: 'JM',
+                        shirt_style: 'short',
+                        quantity: 5,
+                        unit_price: 80,
+                        total_price: 400,
+                    },
+                ],
+            }),
+        );
+        const titles = [
+            ...html.matchAll(
+                /<div class="size-block theme-([a-z]+)">\s*<div class="table-title">([^<]*)<\/div>/g,
+            ),
+        ].map((match) => `${match[1]}:${match[2]}`);
+
+        expect(titles).toEqual([
+            'kids:ขนาดเด็ก',
+            'junior:ขนาดประถม - มัธยมต้น',
+            'adults:ขนาดผู้ใหญ่',
+        ]);
+        // Six tables: a shirt and a trouser list per range.
+        expect(printedTables(html)).toHaveLength(6);
+        // The ประถม table carries only its own line.
+        expect(printedTables(html)[2].join(' | ')).toContain(
+            'JL | แขนสั้น | 6 | 110.00 | 660.00',
+        );
+    });
+
+    it('splits the ranges the same way in the counter preview', () => {
+        openDetail(
+            garmentBill({
+                form_mode: 'pe_uniform',
+                items: [
+                    ...garmentItems,
+                    {
+                        item_type: 'separate_shirt',
+                        size_group: 'kids',
+                        size_tier: 'junior',
+                        size_label: 'JL',
+                        shirt_style: 'short',
+                        quantity: 6,
+                        unit_price: 110,
+                        total_price: 660,
+                    },
+                ],
+            }),
+        );
+
+        expect(screen.getByText('ขนาดประถม - มัธยมต้น')).toBeInTheDocument();
+        expect(screen.getByText('ขนาดผู้ใหญ่')).toBeInTheDocument();
     });
 
     it('shows a dash rather than an empty box when a garment was not ordered', () => {
@@ -571,6 +643,99 @@ describe('a Form 2 bill on the printed receipt', () => {
         ]);
     });
 
+    /**
+     * The floor cuts a run of one length at a time, and a customer reading the
+     * receipt is counting how many of each. Sorting by size first interleaved
+     * them — M long, M short, L long, L short — so the receipt gathers every
+     * short sleeve, then every long one, then the sleeveless, and sizes run in
+     * order inside each. Trousers do the same with short legs before long.
+     */
+    it('gathers the shirts by length, short first, then by size', () => {
+        const [shirtCells] = printedTables(
+            printedHtml(
+                form2Bill([
+                    person({ size_label: 'L', shirt_style: 'long' }),
+                    person({ size_label: 'M', shirt_style: 'sleeveless' }),
+                    person({ size_label: 'L', shirt_style: 'short' }),
+                    person({ size_label: 'M', shirt_style: 'long' }),
+                    person({ size_label: 'M', shirt_style: 'short' }),
+                    person({ size_label: 'L', shirt_style: 'sleeveless' }),
+                ]),
+            ),
+        );
+
+        const listed = shirtCells
+            .slice(5)
+            .reduce<Array<[string, string]>>((pairs, _cell, index, cells) => {
+                if (index % 5 === 0 && cells[index + 1] !== undefined) {
+                    pairs.push([cells[index], cells[index + 1]]);
+                }
+
+                return pairs;
+            }, [])
+            .filter(([size]) => size === 'M' || size === 'L');
+
+        expect(listed).toEqual([
+            ['M', 'แขนสั้น'],
+            ['L', 'แขนสั้น'],
+            ['M', 'แขนยาว'],
+            ['L', 'แขนยาว'],
+            ['M', 'แขนกุด'],
+            ['L', 'แขนกุด'],
+        ]);
+    });
+
+    it('gathers the trousers the same way, short legs first', () => {
+        const [, pantsCells] = printedTables(
+            printedHtml(
+                form2Bill([
+                    person({
+                        item_type: 'pants',
+                        size_label: 'L',
+                        shirt_style: null,
+                        pants_style: 'long',
+                    }),
+                    person({
+                        item_type: 'pants',
+                        size_label: 'M',
+                        shirt_style: null,
+                        pants_style: 'long',
+                    }),
+                    person({
+                        item_type: 'pants',
+                        size_label: 'L',
+                        shirt_style: null,
+                        pants_style: 'short',
+                    }),
+                    person({
+                        item_type: 'pants',
+                        size_label: 'M',
+                        shirt_style: null,
+                        pants_style: 'short',
+                    }),
+                ]),
+            ),
+        );
+
+        const listed = pantsCells
+            .slice(5)
+            .reduce<Array<[string, string]>>((pairs, _cell, index, cells) => {
+                if (index % 5 === 0 && cells[index + 1] !== undefined) {
+                    pairs.push([cells[index], cells[index + 1]]);
+                }
+
+                return pairs;
+            }, [])
+            .filter(([size]) => size === 'M' || size === 'L');
+
+        expect(listed).toEqual([
+            ['M', 'ขาสั้น'],
+            ['L', 'ขาสั้น'],
+            ['M', 'ขายาว'],
+            ['L', 'ขายาว'],
+        ]);
+    });
+
     it('keeps two lengths of one size apart, and two prices apart', () => {
         const shirtCells = printedTables(
             printedHtml(
@@ -587,14 +752,11 @@ describe('a Form 2 bill on the printed receipt', () => {
             ),
         )[0];
 
-        // Same size, but three things to bill: two short at 250, one long at
-        // 280, one short at 300.
+        // Same size, but three things to bill: two short at 250, one short at
+        // 300, one long at 280. The short sleeves come first and stay together
+        // — length decides the order before size or price does — and the two
+        // short lines stay apart because they are billed differently.
         expect(shirtCells.slice(5, 20)).toEqual([
-            'M',
-            'แขนยาว',
-            '1',
-            '280.00',
-            '280.00',
             'M',
             'แขนสั้น',
             '2',
@@ -605,6 +767,11 @@ describe('a Form 2 bill on the printed receipt', () => {
             '1',
             '300.00',
             '300.00',
+            'M',
+            'แขนยาว',
+            '1',
+            '280.00',
+            '280.00',
         ]);
     });
 
@@ -666,5 +833,110 @@ describe('a Form 2 bill on the printed receipt', () => {
 
         expect(screen.getByText('ไซซ์เสื้อ')).toBeInTheDocument();
         expect(screen.getByText('ไซซ์กางเกง')).toBeInTheDocument();
+    });
+});
+
+/**
+ * The sizes stay on the shirt-and-trouser tables above; the spec is printed
+ * one card per sheet the floor sews, each with the spec saved under its own
+ * key, shirts first.
+ */
+const specCards = (html: string): Array<{ key: string; text: string }> =>
+    [
+        ...html.matchAll(
+            /<div class="spec-card [^"]*" data-sheet="([^"]+)">([\s\S]*?)(?=<div class="spec-card |<table class="footer-table">)/g,
+        ),
+    ].map((match) => ({
+        key: match[1],
+        text: match[2]
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim(),
+    }));
+
+const perSheetSpecs = {
+    spec_sections: {
+        shirt: [{ label: 'แพทเทิร์น', value: 'แพทเทิร์นมาตรฐาน' }],
+        pants: [{ label: 'แบบขา', value: 'ขาตรง' }],
+        batches: {
+            shirt_adults_short: [
+                { label: 'แพทเทิร์น', value: 'โปโล' },
+                { label: 'ปลายแขน', value: 'ธรรมดา' },
+            ],
+            shirt_adults_long: [
+                { label: 'แพทเทิร์น', value: 'โปโล' },
+                { label: 'ปลายแขน', value: 'จั๊ม' },
+            ],
+            pants_adults_short: [{ label: 'แบบขา', value: 'ขาจั๊ม' }],
+        },
+    },
+};
+
+/**
+ * The spec used to print as a card per production sheet. It was the one thing
+ * that could push the receipt past its A4 page — six differing sheets meant
+ * six blocks of twenty settings — and it is read on screen instead, where
+ * there is room to group it and to mark what differs between sheets. The
+ * receipt carries what the customer signs for; the floor works from the
+ * production sheets.
+ */
+describe('the spec on a Form 1 receipt', () => {
+    it('prints no spec at all, however many sheets the bill has', () => {
+        const html = printedHtml(garmentBill(perSheetSpecs));
+
+        expect(specCards(html)).toHaveLength(0);
+        expect(html).not.toContain('spec-sections');
+        expect(html).not.toContain('เสื้อผู้ใหญ่ · แขนสั้น');
+        expect(html).not.toContain('ขาจั๊ม');
+    });
+
+    it('still prints the sizes and the signatures', () => {
+        const html = printedHtml(garmentBill(perSheetSpecs));
+
+        expect(html).toContain('ลงชื่อผู้สั่งสินค้า');
+        expect(html).toContain('size: A4 portrait');
+    });
+});
+
+describe('the spec in the counter preview', () => {
+    it('shows the same cards the receipt prints', () => {
+        openDetail(garmentBill(perSheetSpecs));
+
+        const shortSleeve = screen.getByRole('article', {
+            name: 'สเปกเสื้อผู้ใหญ่ · แขนสั้น',
+        });
+        const trousers = screen.getByRole('article', {
+            name: 'สเปกกางเกงผู้ใหญ่ · ขาสั้น',
+        });
+
+        expect(within(shortSleeve).getByText('▲ ธรรมดา')).toBeInTheDocument();
+        expect(
+            within(shortSleeve).getByText('ไซซ์ S 20', { exact: false }),
+        ).toBeInTheDocument();
+        expect(within(trousers).getByText('ขาจั๊ม')).toBeInTheDocument();
+        expect(within(trousers).queryByText('โปโล')).not.toBeInTheDocument();
+        expect(
+            screen.getByRole('article', { name: 'สเปกเสื้อผู้ใหญ่ · แขนยาว' }),
+        ).toBeInTheDocument();
+    });
+});
+
+describe('a colour-house bill in the counter preview', () => {
+    it('shows the pictures of each house, as its printed receipt does', () => {
+        openDetail(
+            garmentBill({
+                form_mode: 'sports_day',
+                sports_day_artwork_urls: [
+                    'https://example.test/red-house.webp',
+                ],
+            }),
+        );
+
+        expect(
+            document.querySelector(
+                'img[src="https://example.test/red-house.webp"]',
+            ),
+        ).not.toBeNull();
     });
 });

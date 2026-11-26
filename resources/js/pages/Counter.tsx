@@ -6,9 +6,11 @@ import {
     ChevronLeft,
     ChevronRight,
     Clock,
+    CalendarClock,
     Copy,
     Factory,
     FilePlus2,
+    Image as ImageIcon,
     MoreHorizontal,
     Package,
     Pencil,
@@ -17,9 +19,23 @@ import {
     Search,
     Trash2,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import DeliveryCalendarDialog from '@/components/domain/counter/DeliveryCalendarDialog';
 import type { DeliveryCalendar } from '@/components/domain/counter/DeliveryCalendarDialog';
+import type { DeliveryNoteTarget } from '@/components/domain/counter/DeliveryNoteDialog';
+import { DeliveryNoteDialog } from '@/components/domain/counter/DeliveryNoteDialog';
+import RescheduleDeliveryDialog, {
+    thaiDate,
+} from '@/components/domain/counter/RescheduleDeliveryDialog';
+import type { RescheduleTarget } from '@/components/domain/counter/RescheduleDeliveryDialog';
+import type { ArtworkTarget } from '@/components/domain/counter/UpdateArtworkDialog';
+import { UpdateArtworkDialog } from '@/components/domain/counter/UpdateArtworkDialog';
+import type {
+    ArtworkGalleryEntry,
+    LabelledArtwork,
+} from '@/components/domain/orders/artworkGallery';
+import { labelArtworkGallery } from '@/components/domain/orders/artworkGallery';
+import type { DeliveryDateLoad } from '@/components/domain/orders/DeliveryDatePicker';
 import {
     WorkReceiptBillHeader,
     WorkReceiptTopBar,
@@ -49,11 +65,27 @@ import {
     SelectItem,
     SelectTrigger,
 } from '@/components/ui/select';
+import { resolveBranchHeaderColor } from '@/lib/branchHeaderColor';
 import {
-    DEFAULT_BRANCH_HEADER_COLOR,
-    resolveBranchHeaderColor,
-} from '@/lib/branchHeaderColor';
+    houseColorTheme,
+    normalizeHouseColor,
+    readableTextOn,
+} from '@/lib/houseColors';
 import type { DashboardInvitation } from '@/types';
+import {
+    buildGarmentSheets,
+    groupSpecRows,
+    sheetSizeSummary,
+    specDifferences,
+} from './counterGarmentSheets';
+import type { GarmentSheet } from './counterGarmentSheets';
+import { bahtText, deliveryNoteRows, deliveryNoteTotals } from './deliveryNote';
+import {
+    garmentStyleColumnLabel,
+    productionStyleLabel,
+    styleLabelsOf,
+} from './Orders/garmentTables';
+import { buildScreenRosterHtml } from './screenRosterSheet';
 
 export interface FloorStats {
     print_room: {
@@ -178,10 +210,15 @@ export interface OrderTableRow {
             line_fb: string | null;
         };
         pricing: {
+            /** Goods AND "คิดเงินเพิ่มเติม": what the discount comes off. */
             total_amount: number;
+            /** The extra charges, each on its own line as the counter typed it. */
+            charges?: Array<{ label: string; amount: number }>;
             discount_percent: number;
             discount_amount: number;
             net_amount: number;
+            /** The delivery note's own reduction, off net_amount and nothing else. */
+            delivery_discount_percent?: number;
             paid_amount: number;
         };
         specification: Record<string, string | number | null> | null;
@@ -235,6 +272,8 @@ export interface OrderTableRow {
             number: string;
             pants_size?: string;
             pants_number?: string;
+            /** Trousers this person ordered; absent on older payloads. */
+            pants_quantity?: number;
             /** The length, or '' on a bill saved before lengths existed. */
             shirt_style?: string;
             pants_style?: string;
@@ -247,6 +286,25 @@ export interface OrderTableRow {
         sports_day_groups?: SportsDayGroupPayload[];
         sports_day_artwork_urls?: string[];
         pe_uniform_artwork_urls?: string[];
+        /** Every picture on the bill once, with the sheets it is on. */
+        artwork_gallery?: ArtworkGalleryEntry[];
+        /** Whether this user may move the delivery date ("เลื่อนส่ง"). */
+        can_reschedule?: boolean;
+        can_update_artwork?: boolean;
+        can_discount_delivery_note?: boolean;
+        /** The date it was due before its latest move, when it moved. */
+        postponed_from?: string | null;
+        /** Every move of the delivery date, oldest first. */
+        due_date_changes?: Array<{
+            from: string;
+            to: string;
+            reason: string;
+            by: string;
+            at: string | null;
+        }>;
+        /** The branch's own number and colour, which head the receipt. */
+        branch_phone?: string | null;
+        branch_header_color?: string | null;
         artwork_url: string | null;
         shirt_artwork_urls: string[];
         pants_artwork_urls: string[];
@@ -273,6 +331,9 @@ type CounterProps = {
     deliveryCalendar: DeliveryCalendar;
     deliveryDueToday?: number;
     savedOrderCode?: string | null;
+    /** Pieces already due per day, for the postpone dialog's date picker. */
+    deliveryDateLoads?: DeliveryDateLoad[];
+    dailyProductionCapacity?: number;
 };
 
 type DepartmentCardProps = {
@@ -474,6 +535,31 @@ function formatTableDate(value: string): string {
     return tableDateFormatter.format(date);
 }
 
+/**
+ * A bill's date the way the counter list writes it: 22/10/2569, and with the
+ * time when asked, 22/10/2569 11:06 น. Read straight from the text — the
+ * server sends the shop's own wall clock, so no timezone may move it.
+ */
+export function billDateText(
+    value: string | null | undefined,
+    withTime = false,
+): string {
+    const match = (value ?? '')
+        .trim()
+        .match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+
+    if (!match) {
+        return '-';
+    }
+
+    const [, year, month, day, hour, minute] = match;
+    const date = `${day}/${month}/${Number(year) + 543}`;
+
+    return withTime && hour !== undefined
+        ? `${date} ${hour}:${minute} น.`
+        : date;
+}
+
 function formatShortDate(value: string): string {
     const date = new Date(value);
 
@@ -631,34 +717,62 @@ const PRINT_PAGE_HEIGHT_MM = 297;
  */
 const PRINT_PAGE_MARGIN_MM = 7;
 /**
+ * Taken off the sheet's own height so it never asks for the whole printable
+ * area. Sized to exactly the 283mm a 7mm margin leaves, the sheet spilled and
+ * printed its signatures alone on a second page: the browser needs the figure
+ * to be under the mark, not level with it.
+ */
+const PRINT_PAGE_SLACK_MM = 3;
+/**
  * The artwork block is the same height on every sheet, so two bills printed one
  * after the other look alike instead of one carrying a poster and the next a
  * stamp. 58mm is what the first artwork on ORD-2026-00010 fills at four images
  * across, which is the size the shop settled on.
  */
 const PRINT_ARTWORK_FIXED_MM = 58;
+/**
+ * How far the fitter may trim to keep a bill on one sheet. The artwork gives
+ * way first: it is a reminder of what was ordered, while the size table is the
+ * figures the floor and the customer both read, so a smaller picture costs less
+ * than smaller numbers. Below these the sheet stops being worth reading and the
+ * bill is allowed its second page instead.
+ */
+const PRINT_ARTWORK_MIN_MM = 26;
+const PRINT_ARTWORK_STEP_MM = 2;
 const PRINT_SIZE_FONT_PX = 11;
 const PRINT_SIZE_FONT_MAX_PX = 15;
+const PRINT_SIZE_FONT_MIN_PX = 8;
 const PRINT_SIZE_FONT_STEP_PX = 0.5;
 
 /**
  * Runs inside the print window: waits for the artwork to load, then decides how
  * the sheet is laid out.
  *
- * A bill carries a spec for every garment type it sells and all of them belong
- * on the receipt, so a long bill is allowed the pages it needs. Nothing is
- * shrunk to avoid a page and nothing is scaled — the stylesheet says where the
- * paper may end, and the sheet reads at one size throughout. What is still
- * worth doing is filling a short bill's page, and numbering the pages of a long
- * one so a customer can see none is missing.
+ * The sheet aims at a single A4 portrait page. The spec no longer prints — it
+ * is read on screen, where there is room for it — so what is left is the
+ * masthead, the artwork, the bill's details and its size tables, and that fits
+ * on one page for all but the longest bills.
+ *
+ * So the fitter works both ways. A short bill's spare room goes to the size
+ * table, up to a size that still looks deliberate. A bill that runs over gives
+ * back the artwork's height first and the table's type second, each only as far
+ * as it must and no further than stays readable. Nothing is scaled: the sheet
+ * reads at one size throughout, whatever it was trimmed to.
+ *
+ * A bill longer than both floors can save is allowed the page it needs rather
+ * than being squeezed past legibility, and the pages are numbered so a customer
+ * can see none is missing.
  */
 export function buildPrintFitScript(): string {
     return `
         (function () {
             var PAGE_MM = ${PRINT_PAGE_HEIGHT_MM} - (${PRINT_PAGE_MARGIN_MM} * 2);
             var FIXED = ${PRINT_ARTWORK_FIXED_MM};
+            var ART_MIN = ${PRINT_ARTWORK_MIN_MM};
+            var ART_STEP = ${PRINT_ARTWORK_STEP_MM};
             var FONT = ${PRINT_SIZE_FONT_PX};
             var FONT_MAX = ${PRINT_SIZE_FONT_MAX_PX};
+            var FONT_MIN = ${PRINT_SIZE_FONT_MIN_PX};
             var FONT_STEP = ${PRINT_SIZE_FONT_STEP_PX};
 
             function whenImagesSettled(done) {
@@ -715,6 +829,10 @@ export function buildPrintFitScript(): string {
                 // artwork — but only while the sheet is still inside one page,
                 // so growth never causes the break it is trying to avoid.
                 if (page.scrollHeight <= limit) {
+                    // Room to spare goes to the size table, because readable
+                    // figures matter more than a big picture, and only while
+                    // the sheet is still inside the page — so growth never
+                    // causes the break it is there to avoid.
                     var font = FONT;
 
                     while (font < FONT_MAX) {
@@ -723,35 +841,39 @@ export function buildPrintFitScript(): string {
 
                         if (page.scrollHeight > limit) { setFont(font - FONT_STEP); break; }
                     }
-                }
+                } else {
+                    // Over the page: give back the artwork's height first, a
+                    // couple of millimetres at a time, and stop the moment it
+                    // fits so nothing is trimmed further than it needs to be.
+                    var art = FIXED;
 
-                // One runner per page, each at the foot of its own page, so a
-                // receipt that runs to three sheets says so on every one of
-                // them. The runners are out of flow, so placing them cannot
-                // push the sheet onto another page.
-                var template = document.querySelector('.print-runner');
-
-                if (template) {
-                    var runnerHeight = template.offsetHeight;
-                    var total = Math.max(1, Math.ceil(page.scrollHeight / limit));
-                    template.remove();
-
-                    for (var i = 0; i < total; i += 1) {
-                        var copy = template.cloneNode(true);
-                        copy.style.top = ((i + 1) * limit - runnerHeight) + 'px';
-                        var slot = copy.querySelector('.print-runner-page');
-
-                        if (slot) {
-                            // A single page needs no numbering; more than one
-                            // does, so the customer can see none is missing.
-                            slot.textContent = total > 1
-                                ? ('หน้า ' + (i + 1) + '/' + total)
-                                : '';
-                        }
-
-                        page.appendChild(copy);
+                    while (art > ART_MIN && page.scrollHeight > limit) {
+                        art = Math.max(ART_MIN, art - ART_STEP);
+                        setArtwork(art);
                     }
+
+                    // Still over, so the table gives way too, down to the
+                    // smallest size the figures stay legible at.
+                    var small = FONT;
+
+                    while (small > FONT_MIN && page.scrollHeight > limit) {
+                        small = Math.max(FONT_MIN, small - FONT_STEP);
+                        setFont(small);
+                    }
+
+                    // If it is still over after both, the bill is simply longer
+                    // than a sheet — it runs on, numbered, rather than being
+                    // squeezed until nobody can read it.
                 }
+
+                // The sheet's closing block is pushed to the foot of the page
+                // by the stylesheet, which states that height in millimetres —
+                // the same unit @page is written in. Restating it here in the
+                // pixels this script measures in was enough to put the sheet
+                // over the mark and the signatures onto a second, otherwise
+                // empty page, so the height is left exactly as the stylesheet
+                // set it. A bill long enough to need another page has no spare
+                // room to push anything into, and closes under its last table.
 
                 window.__printFitted = true;
                 window.print();
@@ -776,64 +898,62 @@ const ADULT_SIZE_ORDER = [
 ];
 const KID_SIZE_ORDER = ['JSS', 'JS', 'JM', 'JL', 'JXL'];
 
-type SpecPrintRow = { label: string; value: string };
-
 /**
- * Settings that read as one and must share a printed row. The receipt lays
- * the spec out two settings to a row, so without this the inner placket
- * colour could end one row and the outer start the next.
+ * The three size ranges a bill is cut in. ประถม - มัธยมต้น is sewn to a
+ * pattern of its own, so it reads as a table of its own — not folded in with
+ * the children it is costed beside.
  */
-const PAIRED_SPEC_LABELS: ReadonlyArray<readonly [string, string]> = [
-    ['สีสาบ (ใน)', 'สีสาบ (นอก)'],
-];
+type SizeTierKey = 'kids' | 'junior' | 'adults';
 
-const isPairedSpecLabel = (label: string): boolean =>
-    PAIRED_SPEC_LABELS.some((pair) => pair.includes(label));
+const SIZE_TIER_KEYS: readonly SizeTierKey[] = ['kids', 'junior', 'adults'];
 
-/**
- * The receipt's spec settings as printed cells, two to a row, with every
- * pair kept on one row. A pair that would start in the right-hand column
- * takes the next single setting up into that slot instead and begins the
- * following row; when there is no single setting left to move, the slot
- * stays blank. Nothing else changes place.
- */
-function layoutSpecPrintCells(
-    rows: SpecPrintRow[],
-): Array<SpecPrintRow | null> {
-    const cells: Array<SpecPrintRow | null> = [];
-    const queue = [...rows];
+const SIZE_TIER_TITLES: Record<SizeTierKey, string> = {
+    kids: 'ขนาดเด็ก',
+    junior: 'ขนาดประถม - มัธยมต้น',
+    adults: 'ขนาดผู้ใหญ่',
+};
 
-    while (queue.length > 0) {
-        const row = queue.shift() as SpecPrintRow;
-        const partner = PAIRED_SPEC_LABELS.find(
-            ([first]) => first === row.label,
-        )?.[1];
-        const startsPair = partner !== undefined && queue[0]?.label === partner;
-
-        if (startsPair && cells.length % 2 === 1) {
-            const fillerIndex = queue.findIndex(
-                (candidate, index) =>
-                    index > 0 && !isPairedSpecLabel(candidate.label),
-            );
-
-            cells.push(
-                fillerIndex === -1
-                    ? null
-                    : (queue.splice(fillerIndex, 1)[0] as SpecPrintRow),
-            );
-        }
-
-        cells.push(row);
+/** The range a saved line was cut in; a line saved before ranges had none. */
+function sizeTierOf(
+    sizeTier: string | null | undefined,
+    sizeGroup: string | null | undefined,
+): SizeTierKey {
+    if (sizeTier === 'kids' || sizeTier === 'junior' || sizeTier === 'adults') {
+        return sizeTier;
     }
 
-    return cells;
+    return sizeGroup === 'kids' ? 'kids' : 'adults';
 }
+
+/** Kids' sizes before adults', so a ประถม table using both reads in order. */
+function sizeOrderFor(tier: SizeTierKey): string[] {
+    return tier === 'kids'
+        ? KID_SIZE_ORDER
+        : tier === 'adults'
+          ? ADULT_SIZE_ORDER
+          : [...KID_SIZE_ORDER, ...ADULT_SIZE_ORDER];
+}
+
+/** One colour per range, the whole block in it: border and heading. */
+const SIZE_TIER_CARD_CLASSES: Record<SizeTierKey, string> = {
+    kids: 'border-emerald-200',
+    junior: 'border-sky-200',
+    adults: 'border-orange-200',
+};
+const SIZE_TIER_HEAD_CLASSES: Record<SizeTierKey, string> = {
+    kids: 'bg-emerald-700',
+    junior: 'bg-sky-700',
+    adults: 'bg-orange-700',
+};
 
 export type SportsDayGroupPayload = {
     team_name: string;
     color_name: string;
+    /** The colour picked for the house's tables on Form 3, when one was. */
+    display_color?: string | null;
     rows: Array<{
-        size_group: 'kids' | 'adults';
+        /** The range the row is cut in; older bills say kids or adults. */
+        size_group: 'kids' | 'junior' | 'adults';
         size_label: string;
         shirt_qty: number;
         shirt_price: number;
@@ -880,20 +1000,11 @@ export function resolveSportsDaySwatch(name: string): {
     );
     const background = match ? match[1] : SPORTS_DAY_FALLBACK_SWATCH;
 
-    // Relative luminance decides the text colour, so a pale house like ครีม or
-    // ขาว keeps readable dark text instead of white on white.
-    const channel = (offset: number): number =>
-        Number.parseInt(background.slice(offset, offset + 2), 16) / 255;
-    const luminance =
-        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-
-    // 0.5 rather than a higher cut: white on ส้ม or เหลือง measures around 3:1,
-    // which is thin on paper, while dark text on the same ground is about 7:1.
-    return { background, text: luminance > 0.5 ? '#0F172A' : '#FFFFFF' };
+    return { background, text: readableTextOn(background) };
 }
 
 export type SportsDayMatrix = {
-    sizeGroup: 'kids' | 'adults';
+    sizeGroup: SizeTierKey;
     garment: 'shirt' | 'pants';
     title: string;
     houses: Array<{ name: string; background: string; text: string }>;
@@ -921,16 +1032,21 @@ export function buildSportsDayMatrices(
 ): SportsDayMatrix[] {
     const houses = groups.map((group) => {
         const label = group.team_name.trim() || group.color_name.trim() || '-';
-        const swatch = resolveSportsDaySwatch(
-            group.color_name.trim() || group.team_name,
-        );
+        // The colour picked for the house wins; a bill without one keeps the
+        // colour read from the house's name.
+        const picked = normalizeHouseColor(group.display_color);
+        const swatch = picked
+            ? houseColorTheme(picked)
+            : resolveSportsDaySwatch(
+                  group.color_name.trim() || group.team_name,
+              );
 
         return { name: label, ...swatch };
     });
 
     const matrices: SportsDayMatrix[] = [];
 
-    for (const sizeGroup of ['kids', 'adults'] as const) {
+    for (const sizeGroup of SIZE_TIER_KEYS) {
         for (const garment of ['shirt', 'pants'] as const) {
             const quantityOf = (row: SportsDayGroupPayload['rows'][number]) =>
                 garment === 'shirt' ? row.shirt_qty : row.pants_qty;
@@ -959,8 +1075,7 @@ export function buildSportsDayMatrices(
                 continue;
             }
 
-            const order =
-                sizeGroup === 'kids' ? KID_SIZE_ORDER : ADULT_SIZE_ORDER;
+            const order = sizeOrderFor(sizeGroup);
             const rank = (label: string): number => {
                 const found = order.indexOf(label.toUpperCase());
 
@@ -1009,16 +1124,14 @@ export function buildSportsDayMatrices(
                         .map((row) => priceOf(row)),
                 );
 
-                const distinct = [...new Set(prices)].sort((a, b) => a - b);
-                // Houses normally share one price per size. When they do not,
-                // the range is shown rather than one house's price standing in
-                // for the others.
+                // Houses normally share one price per size; a size dearer for
+                // one house is the counter adding a surcharge, so that price is
+                // the size's price. The amount beside it is still what each
+                // house is charged, added up.
                 const price =
-                    distinct.length === 0
+                    prices.length === 0
                         ? '-'
-                        : distinct.length === 1
-                          ? formatMoney(distinct[0])
-                          : `${formatMoney(distinct[0])}-${formatMoney(distinct[distinct.length - 1])}`;
+                        : formatMoney(Math.max(...prices));
 
                 return {
                     sizeLabel,
@@ -1060,7 +1173,7 @@ export function buildSportsDayMatrices(
             matrices.push({
                 sizeGroup,
                 garment,
-                title: `${sizeGroup === 'kids' ? 'ขนาดเด็ก · อนุบาล/ประถม' : 'ขนาดผู้ใหญ่ · มัธยมต้น/มัธยมปลาย'} · ${garment === 'shirt' ? 'เสื้อ' : 'กางเกง'}`,
+                title: `${SIZE_TIER_TITLES[sizeGroup]} · ${garment === 'shirt' ? 'เสื้อ' : 'กางเกง'}`,
                 houses,
                 rows,
                 houseTotals,
@@ -1089,17 +1202,15 @@ const SPEC_BATCH_TIER_LABELS: Record<string, string> = {
     adults: 'ผู้ใหญ่',
 };
 
-const SPEC_BATCH_STYLE_LABELS: Record<string, Record<string, string>> = {
-    shirt: { short: 'แขนสั้น', long: 'แขนยาว', sleeveless: 'แขนกุด' },
-    pants: { short: 'ขาสั้น', long: 'ขายาว' },
-};
-
 /** What a sheet is called, read back from the key the bill stores it under. */
 function specBatchLabel(key: string): string {
     const [garment, tier, style] = key.split('_');
     const garmentLabel = garment === 'pants' ? 'กางเกง' : 'เสื้อ';
     const tierLabel = SPEC_BATCH_TIER_LABELS[tier] ?? '';
-    const styleLabel = SPEC_BATCH_STYLE_LABELS[garment]?.[style] ?? '';
+    const styleLabel = productionStyleLabel(
+        garment === 'pants' ? 'pants' : 'shirt',
+        style,
+    );
 
     return [garmentLabel + (tierLabel ? ` ${tierLabel}` : ''), styleLabel]
         .filter((part) => part !== '')
@@ -1164,16 +1275,6 @@ export function buildSpecBlocks(
     }));
 }
 
-const SHIRT_STYLE_PRINT_LABELS: Record<string, string> = {
-    short: 'แขนสั้น',
-    long: 'แขนยาว',
-    sleeveless: 'แขนกุด',
-};
-const PANTS_STYLE_PRINT_LABELS: Record<string, string> = {
-    short: 'ขาสั้น',
-    long: 'ขายาว',
-};
-
 /**
  * One colour per length, shared by shirts and pants, so the rule is a single
  * thing to learn: sky means short, violet means long. Kept clear of the size
@@ -1189,78 +1290,10 @@ const STYLE_CHIP_CLASSES: Record<string, string> = {
     sleeveless: 'bg-pink-100 text-pink-800 ring-1 ring-pink-200',
 };
 
-const SHIRT_STYLE_COLUMN_LABELS: Record<string, string> = {
-    short: 'เสื้อแขนสั้น',
-    long: 'เสื้อแขนยาว',
-    sleeveless: 'เสื้อแขนกุด',
-};
-const PANTS_STYLE_COLUMN_LABELS: Record<string, string> = {
-    short: 'กางเกงขาสั้น',
-    long: 'กางเกงขายาว',
-};
-
 /**
  * The same lengths without the garment in front, for the person lists where the
  * column already says which garment it is.
  */
-const SHIRT_STYLE_PERSON_LABELS: Record<string, string> = {
-    short: 'แขนสั้น',
-    long: 'แขนยาว',
-    sleeveless: 'แขนกุด',
-};
-const PANTS_STYLE_PERSON_LABELS: Record<string, string> = {
-    short: 'ขาสั้น',
-    long: 'ขายาว',
-};
-
-/**
- * How a person list wears one garment's length.
- *
- * A bill where everyone matches needs no column of its own — saying the length
- * once in the header is shorter and reads better — while a mixed bill needs one
- * so the customer can see who differs. A bill saved before lengths existed
- * carries none at all and prints exactly as it always did.
- */
-type PersonLengthSummary = {
-    /** True when the list carries both lengths and needs its own column. */
-    mixed: boolean;
-    /** e.g. "แขนสั้น 20 คน · แขนยาว 10 คน", '' when the bill says nothing. */
-    caption: string;
-    /** The label for one person's cell. */
-    labelOf: (style: string | undefined) => string;
-};
-
-function summarizePersonLengths(
-    styles: Array<string | undefined>,
-    labels: Record<string, string>,
-): PersonLengthSummary {
-    const counts = new Map<string, number>();
-
-    // Which lengths exist is the label table's business, not this function's.
-    // Written out as a pair, it printed a dash for a sleeveless shirt — the
-    // bill said แขนกุด and the sheet said nothing.
-    for (const style of styles) {
-        if (!style || labels[style] === undefined) {
-            continue;
-        }
-
-        counts.set(style, (counts.get(style) ?? 0) + 1);
-    }
-
-    const used = Object.keys(labels).filter((style) => counts.has(style));
-
-    return {
-        mixed: used.length > 1,
-        caption: used
-            .map(
-                (style) =>
-                    `${labels[style]} ${(counts.get(style) ?? 0).toLocaleString('th-TH')} คน`,
-            )
-            .join(' · '),
-        labelOf: (style) =>
-            style && labels[style] !== undefined ? labels[style] : '-',
-    };
-}
 
 /**
  * The order-item types a garment table can show: one garment, one size, one
@@ -1278,6 +1311,7 @@ const GARMENT_TABLE_ITEM_TYPES = [
 type CounterOrderItem = {
     item_type?: string;
     size_group?: string;
+    size_tier?: string | null;
     size_label?: string;
     shirt_style?: string | null;
     pants_style?: string | null;
@@ -1325,7 +1359,7 @@ type GarmentPrintLine = {
 };
 
 type GarmentSizeGroup = {
-    sizeGroup: 'kids' | 'adults';
+    sizeGroup: SizeTierKey;
     title: string;
     shirt: GarmentPrintLine[];
     pants: GarmentPrintLine[];
@@ -1343,32 +1377,40 @@ type GarmentSizeGroup = {
  */
 function buildGarmentLines(
     items: CounterOrderItem[],
-    sizeGroup: 'kids' | 'adults',
+    sizeGroup: SizeTierKey,
     garment: 'shirt' | 'pants',
 ): GarmentPrintLine[] {
     const wanted =
         garment === 'shirt'
             ? ['separate_shirt', 'shirt']
             : ['separate_pants', 'pants'];
-    const styleLabels =
-        garment === 'shirt'
-            ? SHIRT_STYLE_PRINT_LABELS
-            : PANTS_STYLE_PRINT_LABELS;
-    const sizeOrder = sizeGroup === 'kids' ? KID_SIZE_ORDER : ADULT_SIZE_ORDER;
+    // The shop's own lengths, in the order it reads them — so a length it
+    // added itself both prints and sorts like the rest.
+    const styleLabels = styleLabelsOf(garment);
+    const sizeOrder = sizeOrderFor(sizeGroup);
     const rankOf = (label: string): number => {
         const rank = sizeOrder.indexOf(label.trim().toUpperCase());
 
         return rank === -1 ? Number.MAX_SAFE_INTEGER : rank;
     };
+    // The length each line is cut at decides where it sits, before its size
+    // does: every short sleeve together, then every long one, then the
+    // sleeveless — and short legs before long. The label tables are already
+    // written in that order, so the order is read from them rather than
+    // repeated here. A line from before lengths were recorded has no label and
+    // sorts after the ones that do.
+    const styleRanks = new Map(
+        Object.values(styleLabels).map((label, index) => [label, index]),
+    );
+    const styleRankOf = (label: string): number =>
+        styleRanks.get(label) ?? Number.MAX_SAFE_INTEGER;
 
     const lines = new Map<string, GarmentPrintLine>();
 
     items
         .filter(
             (item) =>
-                ((item.size_group ?? 'adults') === 'kids'
-                    ? 'kids'
-                    : 'adults') === sizeGroup &&
+                sizeTierOf(item.size_tier, item.size_group) === sizeGroup &&
                 wanted.includes((item.item_type ?? '').toLowerCase()),
         )
         .forEach((item) => {
@@ -1402,9 +1444,10 @@ function buildGarmentLines(
 
     return [...lines.values()].sort(
         (left, right) =>
+            styleRankOf(left.styleLabel) - styleRankOf(right.styleLabel) ||
             rankOf(left.sizeLabel) - rankOf(right.sizeLabel) ||
             left.sizeLabel.localeCompare(right.sizeLabel, 'th') ||
-            left.styleLabel.localeCompare(right.styleLabel, 'th'),
+            left.unitPrice - right.unitPrice,
     );
 }
 
@@ -1423,17 +1466,12 @@ function garmentLineTotals(lines: GarmentPrintLine[]): {
 }
 
 function buildGarmentSizeGroups(items: CounterOrderItem[]): GarmentSizeGroup[] {
-    return (['kids', 'adults'] as const)
-        .map((sizeGroup) => ({
-            sizeGroup,
-            title:
-                sizeGroup === 'kids'
-                    ? 'ขนาดเด็ก · อนุบาล/ประถม'
-                    : 'ขนาดผู้ใหญ่ · มัธยมต้น/มัธยมปลาย',
-            shirt: buildGarmentLines(items, sizeGroup, 'shirt'),
-            pants: buildGarmentLines(items, sizeGroup, 'pants'),
-        }))
-        .filter((group) => group.shirt.length > 0 || group.pants.length > 0);
+    return SIZE_TIER_KEYS.map((sizeGroup) => ({
+        sizeGroup,
+        title: SIZE_TIER_TITLES[sizeGroup],
+        shirt: buildGarmentLines(items, sizeGroup, 'shirt'),
+        pants: buildGarmentLines(items, sizeGroup, 'pants'),
+    })).filter((group) => group.shirt.length > 0 || group.pants.length > 0);
 }
 
 /**
@@ -1447,17 +1485,14 @@ function GarmentSizeGroupCards({ groups }: { groups: GarmentSizeGroup[] }) {
             {groups.map((group) => {
                 const shirtTotals = garmentLineTotals(group.shirt);
                 const pantsTotals = garmentLineTotals(group.pants);
-                const isKids = group.sizeGroup === 'kids';
 
                 return (
                     <div
                         key={group.sizeGroup}
-                        className={`overflow-hidden rounded-lg border ${isKids ? 'border-emerald-200' : 'border-orange-200'}`}
+                        className={`overflow-hidden rounded-lg border ${SIZE_TIER_CARD_CLASSES[group.sizeGroup]}`}
                     >
                         <div
-                            className={`flex items-center justify-between gap-2 px-3 py-1.5 text-xs font-bold text-white ${
-                                isKids ? 'bg-emerald-700' : 'bg-orange-700'
-                            }`}
+                            className={`flex items-center justify-between gap-2 px-3 py-1.5 text-xs font-bold text-white ${SIZE_TIER_HEAD_CLASSES[group.sizeGroup]}`}
                         >
                             <span>{group.title}</span>
                             <span className="font-semibold">
@@ -1628,6 +1663,129 @@ function GarmentPreviewTable({
     );
 }
 
+/**
+ * The spec of a bill sold as separate pieces, one card per sheet the floor
+ * sews — เสื้อเด็ก · แขนสั้น, กางเกงผู้ใหญ่ · ขายาว — shirts first, then
+ * trousers. Each card says what it covers and how many, then reads like a spec
+ * a person writes out: fabric, shape, then what goes on it. A setting that is
+ * not the same on every sheet of that garment is marked, because that is the
+ * one the floor must not sew from habit.
+ */
+function GarmentSpecCards({ sheets }: { sheets: GarmentSheet[] }) {
+    const differences = specDifferences(sheets);
+
+    return (
+        <section className="rounded-lg border border-slate-300 bg-white p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-slate-700">
+                    สเปกการผลิต แยกตามประเภท
+                </h3>
+                {differences.size > 0 ? (
+                    <p className="flex items-center gap-1.5 text-[11px] text-slate-600">
+                        <span className="rounded bg-amber-100 px-1.5 py-0.5 font-bold text-amber-900 ring-1 ring-amber-300">
+                            ▲ ค่าที่ไฮไลต์
+                        </span>
+                        ไม่เหมือนกันทุกตาราง ตรวจก่อนผลิต
+                    </p>
+                ) : null}
+            </div>
+
+            <div className="space-y-3">
+                {sheets.map((sheet) => {
+                    const isPants = sheet.garment === 'pants';
+                    const groups = groupSpecRows(sheet.spec, sheet.garment);
+
+                    return (
+                        <article
+                            key={sheet.key}
+                            aria-label={`สเปก${sheet.title}`}
+                            className={`overflow-hidden rounded-lg border border-l-4 border-slate-200 ${
+                                isPants
+                                    ? 'border-l-[#E21E26]'
+                                    : 'border-l-[#174395]'
+                            }`}
+                        >
+                            <header
+                                className={`flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 px-3 py-2 ${
+                                    isPants ? 'bg-rose-50' : 'bg-blue-50'
+                                }`}
+                            >
+                                <h4
+                                    className={`text-sm font-bold ${
+                                        isPants
+                                            ? 'text-[#B3151C]'
+                                            : 'text-[#174395]'
+                                    }`}
+                                >
+                                    {sheet.title}
+                                </h4>
+                                <p className="text-xs text-slate-600">
+                                    <span className="font-bold text-slate-900 tabular-nums">
+                                        {sheet.quantity.toLocaleString('th-TH')}{' '}
+                                        ตัว
+                                    </span>
+                                    <span className="mx-1.5 text-slate-300">
+                                        |
+                                    </span>
+                                    ไซซ์ {sheetSizeSummary(sheet)}
+                                </p>
+                            </header>
+
+                            {groups.length === 0 ? (
+                                <p className="px-3 py-4 text-center text-xs text-slate-500">
+                                    ยังไม่มีข้อมูลสเปกที่บันทึก
+                                </p>
+                            ) : (
+                                <div className="grid gap-x-6 gap-y-3 px-3 py-2.5 md:grid-cols-3">
+                                    {groups.map((group) => (
+                                        <div
+                                            key={group.title}
+                                            className="min-w-0"
+                                        >
+                                            <p className="mb-1 border-b border-slate-200 pb-0.5 text-[11px] font-bold tracking-wide text-slate-500">
+                                                {group.title}
+                                            </p>
+                                            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                                                {group.rows.map((row) => {
+                                                    const differs =
+                                                        differences.has(
+                                                            `${sheet.key}|${row.label}`,
+                                                        );
+
+                                                    return (
+                                                        <Fragment
+                                                            key={row.label}
+                                                        >
+                                                            <dt className="text-slate-500">
+                                                                {row.label}
+                                                            </dt>
+                                                            <dd
+                                                                className={
+                                                                    differs
+                                                                        ? 'rounded bg-amber-100 px-1 font-bold break-words text-amber-950 ring-1 ring-amber-300'
+                                                                        : 'font-semibold break-words text-slate-900'
+                                                                }
+                                                            >
+                                                                {differs
+                                                                    ? `▲ ${row.value}`
+                                                                    : row.value}
+                                                            </dd>
+                                                        </Fragment>
+                                                    );
+                                                })}
+                                            </dl>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </article>
+                    );
+                })}
+            </div>
+        </section>
+    );
+}
+
 type PrintSizeRow = {
     sizeLabel: string;
     shirtStyle: string;
@@ -1668,10 +1826,11 @@ function buildPrintSizeRows(
 ): PrintSizeRow[] {
     const rows: PrintSizeRow[] = [];
 
+    // The length as the bill saved it. Checked against spelled-out codes, a
+    // line sold at a length the shop added fell into the no-length bucket and
+    // its quantity was printed under a heading that named no length at all.
     const styleOf = (value: unknown): string =>
-        value === 'short' || value === 'long' || value === 'sleeveless'
-            ? value
-            : '';
+        typeof value === 'string' ? value.trim() : '';
 
     // 'garment' is the value used before the split existed and is read as a set,
     // which is what Form 1 wrote it for.
@@ -2007,6 +2166,8 @@ function OrderActionMenu({
     editTitle,
     onDuplicate,
     onDelete,
+    onReschedule,
+    onUpdateArtwork,
     triggerClassName,
     iconClassName,
 }: {
@@ -2016,6 +2177,8 @@ function OrderActionMenu({
     editTitle: string;
     onDuplicate: (row: OrderTableRow) => void;
     onDelete: (row: OrderTableRow) => void;
+    onReschedule: (row: OrderTableRow) => void;
+    onUpdateArtwork: (row: OrderTableRow) => void;
     triggerClassName: string;
     iconClassName: string;
 }) {
@@ -2046,9 +2209,48 @@ function OrderActionMenu({
                     <Pencil className="size-4" />
                     แก้ไข
                 </DropdownMenuItem>
+                {/* Wider than แก้ไข on purpose: the sizes and prices must stop
+                    moving once the floor starts cutting, but the pictures are
+                    the one part that legitimately keeps changing — a corrected
+                    logo mid-run, and a photograph of what actually shipped
+                    once the job is done. */}
+                <DropdownMenuItem
+                    disabled={!row.details?.can_update_artwork}
+                    title={
+                        row.details?.can_update_artwork
+                            ? 'เพิ่ม ลบ หรือย้ายรูปของบิลนี้'
+                            : 'อัปเดตรูปได้เฉพาะบิลที่ยังไม่ยกเลิก'
+                    }
+                    onSelect={() => {
+                        if (row.details?.can_update_artwork) {
+                            onUpdateArtwork(row);
+                        }
+                    }}
+                >
+                    <ImageIcon className="size-4" />
+                    อัปเดตรูป
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => onDuplicate(row)}>
                     <Copy className="size-4" />
                     เปิดบิลอีกครั้ง
+                </DropdownMenuItem>
+                {/* Open while the bill is in production, unlike editing;
+                    closed once it is finished or cancelled. */}
+                <DropdownMenuItem
+                    disabled={!row.details?.can_reschedule}
+                    title={
+                        row.details?.can_reschedule
+                            ? 'เลื่อนวันส่ง'
+                            : 'เลื่อนส่งได้เฉพาะงานที่ยังไม่ปิดงาน'
+                    }
+                    onSelect={() => {
+                        if (row.details?.can_reschedule) {
+                            onReschedule(row);
+                        }
+                    }}
+                >
+                    <CalendarClock className="size-4" />
+                    เลื่อนส่ง
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -2083,6 +2285,8 @@ function OrdersTable({
     isAdmin,
     onDuplicate,
     onDelete,
+    onReschedule,
+    onUpdateArtwork,
 }: {
     rows: OrderTableRow[];
     pagination?: CounterPagination;
@@ -2093,6 +2297,8 @@ function OrdersTable({
     isAdmin: boolean;
     onDuplicate: (row: OrderTableRow) => void;
     onDelete: (row: OrderTableRow) => void;
+    onReschedule: (row: OrderTableRow) => void;
+    onUpdateArtwork: (row: OrderTableRow) => void;
 }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -2359,6 +2565,10 @@ function OrdersTable({
                                                     )}
                                                     onDuplicate={onDuplicate}
                                                     onDelete={onDelete}
+                                                    onReschedule={onReschedule}
+                                                    onUpdateArtwork={
+                                                        onUpdateArtwork
+                                                    }
                                                     triggerClassName="size-9 shrink-0 border border-slate-200 text-slate-600 hover:text-[#E21E26]"
                                                     iconClassName="size-4"
                                                 />
@@ -2502,6 +2712,12 @@ function OrdersTable({
                                                                 onDuplicate
                                                             }
                                                             onDelete={onDelete}
+                                                            onReschedule={
+                                                                onReschedule
+                                                            }
+                                                            onUpdateArtwork={
+                                                                onUpdateArtwork
+                                                            }
                                                             triggerClassName="size-7 text-slate-500 hover:text-[#E21E26]"
                                                             iconClassName="size-3.5"
                                                         />
@@ -2602,42 +2818,6 @@ function OrdersTable({
     );
 }
 
-/**
- * The roster carries the shop logo and a barcode. Printing the moment the
- * markup is written caught them mid-download, so the first print of the day
- * came out with an empty masthead and only a reprint -- once the browser had
- * them cached -- looked right. Wait for them, and never wait forever.
- */
-function buildRosterPrintScript(): string {
-    return `
-    (function () {
-        var images = Array.prototype.slice.call(document.images);
-        var pending = images.length;
-        var printed = false;
-
-        function go() {
-            if (printed) { return; }
-            printed = true;
-            window.focus();
-            window.print();
-        }
-
-        if (pending === 0) { go(); return; }
-
-        var finish = function () { pending -= 1; if (pending <= 0) { go(); } };
-
-        images.forEach(function (image) {
-            if (image.complete) { finish(); return; }
-            image.addEventListener('load', finish, { once: true });
-            image.addEventListener('error', finish, { once: true });
-        });
-
-        // A stalled image must not hold the sheet hostage.
-        setTimeout(go, 3000);
-    })();
-`;
-}
-
 export default function Counter({
     pendingInvitations = [],
     branches,
@@ -2648,6 +2828,8 @@ export default function Counter({
     deliveryCalendar,
     deliveryDueToday = 0,
     savedOrderCode = null,
+    deliveryDateLoads = [],
+    dailyProductionCapacity = 200,
 }: CounterProps) {
     const { currentTeam, auth } = usePage<{
         currentTeam?: { slug: string } | null;
@@ -2665,6 +2847,30 @@ export default function Counter({
     const handleDuplicateOrder = (row: OrderTableRow) => {
         router.visit(`/orders/${row.id}/duplicate`);
     };
+
+    // "เลื่อนส่ง", opened from a bill's menu or from the delivery calendar.
+    const [rescheduleTarget, setRescheduleTarget] =
+        useState<RescheduleTarget | null>(null);
+    const rescheduleRow = (row: OrderTableRow) =>
+        setRescheduleTarget({
+            id: row.id,
+            orderCode: row.order_code,
+            dueDate: (row.due_date ?? '').slice(0, 10),
+            quantity: row.order_item_count ?? 0,
+            jobName: row.details?.job_name ?? null,
+        });
+
+    // "อัปเดตรูป". The dialog fetches the bill's pictures itself when it
+    // opens, so the row only has to name which bill.
+    const [artworkTarget, setArtworkTarget] = useState<ArtworkTarget | null>(
+        null,
+    );
+    const artworkRow = (row: OrderTableRow) =>
+        setArtworkTarget({
+            id: row.id,
+            orderCode: row.order_code,
+            jobName: row.details?.job_name ?? null,
+        });
 
     const handleConfirmDelete = () => {
         if (!pendingDelete) {
@@ -2933,17 +3139,25 @@ export default function Counter({
             : 'วันที่จัดส่ง: ทั้งหมด';
     const detailImages = useMemo(() => {
         if (!selectedOrder?.details) {
-            return [] as string[];
+            return [] as LabelledArtwork[];
         }
 
-        const list = [
-            selectedOrder.details.artwork_url,
-            ...selectedOrder.details.shirt_artwork_urls,
-            ...selectedOrder.details.pants_artwork_urls,
-            ...selectedOrder.details.reference_designs,
-        ].filter((url): url is string => Boolean(url));
-
-        return Array.from(new Set(list));
+        // The same pictures the printed receipt carries, each once: a file
+        // attached to two tables is one picture, labelled with both.
+        return labelArtworkGallery(
+            selectedOrder.details.artwork_gallery,
+            [
+                selectedOrder.details.artwork_url,
+                ...selectedOrder.details.shirt_artwork_urls,
+                ...selectedOrder.details.pants_artwork_urls,
+                ...(selectedOrder.details.sports_day_artwork_urls ?? []),
+                ...(selectedOrder.details.pe_uniform_artwork_urls ?? []),
+                ...selectedOrder.details.reference_designs,
+            ],
+            (selectedOrder.details.sports_day_groups ?? []).map(
+                (group) => group.team_name.trim() || group.color_name.trim(),
+            ),
+        );
     }, [selectedOrder]);
     const deliveryMethodValue = selectedOrder?.details?.delivery_method ?? null;
     const shippingAddressValue =
@@ -3013,6 +3227,25 @@ export default function Counter({
             : null;
     }, [selectedOrder]);
 
+    /**
+     * The spec of a Forms 1, 2 and 4 bill, one card per garment, tier and
+     * length. null leaves a colour-house or set bill on the spec blocks it
+     * has always shown.
+     */
+    const dialogSpecSheets = useMemo(() => {
+        const details = selectedOrder?.details;
+        const items = details?.items ?? [];
+
+        return billUsesGarmentTables(items, details?.form_mode)
+            ? buildGarmentSheets(
+                  items,
+                  details?.spec_sections?.batches,
+                  shirtSpecificationRows,
+                  pantsSpecificationRows,
+              )
+            : null;
+    }, [selectedOrder, shirtSpecificationRows, pantsSpecificationRows]);
+
     const dialogSizeGroups = useMemo(() => {
         const items = selectedOrder?.details?.items ?? [];
 
@@ -3035,10 +3268,14 @@ export default function Counter({
                     // states the length for a garment it actually contains --
                     // a shirt-only line leaves the leg column empty rather than
                     // borrowing the length off the set it sits next to.
-                    const shirtStyle =
-                        SHIRT_STYLE_PRINT_LABELS[row.shirtStyle] ?? '';
-                    const pantsStyle =
-                        PANTS_STYLE_PRINT_LABELS[row.pantsStyle] ?? '';
+                    const shirtStyle = productionStyleLabel(
+                        'shirt',
+                        row.shirtStyle,
+                    );
+                    const pantsStyle = productionStyleLabel(
+                        'pants',
+                        row.pantsStyle,
+                    );
 
                     const lines: Array<{
                         key: string;
@@ -3233,12 +3470,64 @@ export default function Counter({
         );
     };
 
-    const handlePrintDeliveryNote = (row: OrderTableRow) => {
+    /**
+     * "ใบจัดส่ง" opens the note before the paper. The counter decides the
+     * note's own discount here, and only then is anything printed.
+     */
+    const [deliveryNoteTarget, setDeliveryNoteTarget] =
+        useState<DeliveryNoteTarget | null>(null);
+
+    const openDeliveryNote = (row: OrderTableRow) => {
         const order = row.details;
 
         if (!order) {
             return;
         }
+
+        setDeliveryNoteTarget({
+            id: row.id,
+            orderCode: row.order_code,
+            customerName: order.customer.name || row.customer_name || '-',
+            jobName: order.job_name || '-',
+            dueDate: row.due_date ?? '',
+            deliveryMethod: deliveryMethodLabel(order.delivery_method),
+            shippingAddress: order.shipping_address ?? '',
+            rows: deliveryNoteRows(order.items ?? []),
+            charges: order.pricing.charges ?? [],
+            gross: order.pricing.total_amount,
+            billDiscountPercent: order.pricing.discount_percent,
+            billDiscountAmount: order.pricing.discount_amount,
+            billNet: order.pricing.net_amount,
+            discountPercent: order.pricing.delivery_discount_percent ?? 0,
+            canDiscount: order.can_discount_delivery_note ?? false,
+        });
+    };
+
+    const handlePrintDeliveryNote = (
+        row: OrderTableRow,
+        deliveryDiscountPercent: number,
+    ) => {
+        const order = row.details;
+
+        if (!order) {
+            return;
+        }
+
+        const noteRows = deliveryNoteRows(order.items ?? []);
+        const noteCharges = order.pricing.charges ?? [];
+        const notePieces = noteRows.reduce(
+            (sum, noteRow) => sum + noteRow.quantity,
+            0,
+        );
+        const noteTotals = deliveryNoteTotals(
+            {
+                gross: order.pricing.total_amount,
+                billDiscountPercent: order.pricing.discount_percent,
+                billDiscountAmount: order.pricing.discount_amount,
+                billNet: order.pricing.net_amount,
+            },
+            deliveryDiscountPercent,
+        );
 
         const deliveryInfo = order.shipping_delivery_info;
         const deliveryDetails =
@@ -3258,29 +3547,196 @@ export default function Counter({
             return;
         }
 
+        const noteLines = [
+            ...noteRows.map((noteRow) => ({
+                name: noteRow.type,
+                size: noteRow.size,
+                quantity: noteRow.quantity.toLocaleString('th-TH'),
+                unitPrice: formatMoney(noteRow.unitPrice),
+                total: noteRow.total,
+            })),
+            // The bill's extra charges are money on the note too, with no
+            // size and no unit price to give.
+            ...noteCharges.map((charge) => ({
+                name: charge.label,
+                size: '',
+                quantity: '',
+                unitPrice: '',
+                total: charge.amount,
+            })),
+        ];
+        const summaryRow = (label: string, value: string, modifier = '') =>
+            `<tr class="${modifier}"><th>${escapeHtml(label)}</th><td>${value}</td></tr>`;
+
         printWindow.document
-            .write(`<!doctype html><html><head><meta charset="utf-8"><title>ใบส่งมอบสินค้า ${escapeHtml(row.order_code)}</title><style>
-            @page { size: A4 portrait; margin: 8mm; }
+            .write(`<!doctype html><html><head><meta charset="utf-8"><title>ใบส่งสินค้า ${escapeHtml(row.order_code)}</title><style>
+            @page { size: A4 portrait; margin: 10mm 10mm 8mm; }
             * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            html, body { width: 210mm; height: 297mm; margin: 0; }
-            body { color: #172554; font-family: 'TH Sarabun New', 'Noto Sans Thai', Arial, sans-serif; font-size: 15px; }
-            .note { height: 281mm; overflow: hidden; border: 0.55mm solid #486581; border-radius: 3mm; padding: 3.5mm; }
-            .header { display: grid; grid-template-columns: 1fr 62mm; gap: 4mm; }
-            .top { display: grid; grid-template-columns: minmax(0, 1fr) 76mm; gap: 4mm; }
-            .logo { width: 38mm; }.tax, .original { margin: 1mm 0; color: #a04848; font-weight: 700; }
-            .title { border: 0.55mm solid #486581; border-radius: 2.5mm; padding: 2mm; text-align: center; font-size: 24px; font-weight: 700; }
-            .original { text-align: center; }.top { margin-top: 2mm; }
-            .box { min-height: 34mm; border: 0.55mm solid #486581; border-radius: 4.5mm; padding: 3mm 4mm; }
-            .line { margin: 0 0 1.5mm; font-size: 16px; }.meta { display: grid; grid-template-columns: 32mm minmax(0, 1fr); gap: 1mm 2mm; margin: 0; font-size: 14px; }.meta dt, .meta dd { margin: 0; }.meta dt { white-space: nowrap; }.meta dd { min-width: 0; overflow-wrap: anywhere; text-align: right; font-weight: 700; }
-            table { width: 100%; margin-top: 2.5mm; border: 0.55mm solid #486581; border-collapse: separate; border-spacing: 0; border-radius: 3.5mm; overflow: hidden; }
-            th, td { border-right: 0.3mm solid #486581; border-bottom: 0.3mm solid #486581; padding: 2mm 2.5mm; vertical-align: top; } th:last-child, td:last-child { border-right: 0; } tbody tr:last-child td { border-bottom: 0; } th { background: #f8fafc; text-align: center; font-weight: 700; }
-            .center { text-align: center; white-space: nowrap; }.item td { height: 96mm; }.summary { text-align: right; font-weight: 700; }.received { padding: 3mm; text-align: center; font-weight: 700; }
-            .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; margin-top: 3mm; }.signature { min-height: 34mm; border: 0.55mm solid #486581; border-radius: 3.5mm; padding: 3mm; }.sign-line { margin: 16mm 4mm 0; border-bottom: 0.3mm dotted #172554; }.sign-date { margin-top: 2mm; text-align: center; }
-        </style></head><body><main class="note">
-            <header class="header"><div><img class="logo" src="/images/logo/logo.png" alt="J.S. Sport"><p class="tax">ไม่ใช่ใบกำกับภาษี</p></div><div><div class="title">ใบส่งมอบสินค้า</div><p class="original">ต้นฉบับ</p></div></header>
-            <section class="top"><div class="box"><p class="line"><strong>ลูกค้า</strong> ${escapeHtml(order.customer.name || row.customer_name || '-')}</p><p class="line"><strong>ที่อยู่</strong> ${escapeHtml(order.shipping_address || '-')}</p><p class="line"><strong>วิธีส่งมอบ</strong> ${escapeHtml(deliveryMethodLabel(order.delivery_method))}</p><p class="line"><strong>รายละเอียดขนส่ง</strong> ${escapeHtml(deliveryDetails || '-')}</p></div><div class="box"><dl class="meta"><dt>เลขที่ออเดอร์</dt><dd>${escapeHtml(row.order_code)}</dd><dt>วันที่ส่งมอบ</dt><dd>${escapeHtml(formatTableDate(row.due_date))}</dd><dt>ชื่อหน่วยงาน, ชื่องาน</dt><dd>${escapeHtml(order.job_name || '-')}</dd></dl></div></section>
-            <table><thead><tr><th style="width:9%">ลำดับ</th><th>รายการ</th><th style="width:13%">จำนวน</th><th style="width:18%">จำนวนเงิน</th></tr></thead><tbody><tr class="item"><td class="center">1</td><td>${escapeHtml(order.job_type || row.job_type || '-')}: ${escapeHtml(order.job_name || '-')}</td><td class="center">${(row.order_item_count ?? 0).toLocaleString('th-TH')}</td><td class="center">${formatMoney(order.pricing.net_amount)}</td></tr><tr><td colspan="2" class="received">ได้รับสินค้าตามรายการข้างบนนี้ถูกต้องแล้ว</td><td class="summary">รวม</td><td class="summary">${formatMoney(order.pricing.net_amount)}</td></tr></tbody></table>
-            <section class="signatures"><div class="signature"><strong>ผู้รับสินค้า</strong><div class="sign-line"></div><div class="sign-date">วันที่ ................................</div></div><div class="signature"><strong>ผู้ส่งสินค้า</strong><div class="sign-line"></div><div class="sign-date">${escapeHtml(deliveryInfo?.sender_signature || '-')}<br>วันที่ ${escapeHtml(formatTableDate(row.due_date))}</div></div></section>
+            html, body { margin: 0; padding: 0; }
+            body {
+                width: 190mm; color: #0f172a;
+                font-family: 'TH Sarabun New', 'Noto Sans Thai', 'Sarabun', Arial, sans-serif;
+                font-size: 14px; line-height: 1.45;
+            }
+            .sheet { display: flex; min-height: 277mm; flex-direction: column; }
+            .masthead { display: flex; align-items: flex-start; justify-content: space-between; gap: 8mm; border-bottom: 0.7mm solid #0f172a; padding-bottom: 3mm; }
+            .brand { display: flex; align-items: center; gap: 4mm; }
+            .brand img { width: 30mm; }
+            .brand-name { font-size: 19px; font-weight: 700; letter-spacing: 0.2px; }
+            .brand-line { color: #475569; font-size: 13px; }
+            .doc { text-align: right; }
+            .doc-title { font-size: 25px; font-weight: 700; letter-spacing: 1px; line-height: 1.1; }
+            .doc-sub { color: #64748b; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; }
+            .doc-tags { margin-top: 1.5mm; display: flex; justify-content: flex-end; gap: 2mm; }
+            .tag { border: 0.3mm solid #94a3b8; border-radius: 1mm; padding: 0.6mm 2mm; color: #475569; font-size: 11px; }
+            .tag.is-original { border-color: #0f172a; color: #0f172a; font-weight: 700; }
+
+            .parties { display: grid; grid-template-columns: minmax(0, 1fr) 72mm; gap: 6mm; margin-top: 4mm; }
+            .party-label { color: #64748b; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+            .party-name { font-size: 16px; font-weight: 700; }
+            .party p { margin: 0.6mm 0 0; color: #334155; }
+            .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.8mm 3mm; margin: 0; }
+            .facts dt { margin: 0; color: #64748b; white-space: nowrap; }
+            .facts dd { margin: 0; text-align: right; font-weight: 700; overflow-wrap: anywhere; }
+
+            .items { width: 100%; margin-top: 5mm; border-collapse: collapse; }
+            .items thead { display: table-header-group; }
+            .items th { border-bottom: 0.5mm solid #0f172a; padding: 2mm 2.5mm; color: #0f172a; font-size: 12px; letter-spacing: 0.4px; text-align: left; }
+            .items td { border-bottom: 0.2mm solid #e2e8f0; padding: 2.2mm 2.5mm; vertical-align: top; }
+            .items tbody tr { break-inside: avoid; }
+            .num { width: 10mm; text-align: center; }
+            .size { width: 18mm; text-align: center; }
+            .qty { width: 20mm; text-align: right; }
+            .price { width: 26mm; text-align: right; }
+            .amount { width: 30mm; text-align: right; }
+            .money { font-variant-numeric: tabular-nums; }
+            .is-charge .name { color: #334155; }
+            .dash { color: #94a3b8; }
+            .count-row td { border-bottom: 0.5mm solid #0f172a; padding-top: 2.5mm; font-weight: 700; }
+
+            .fill { flex: 1 1 auto; min-height: 6mm; }
+
+            .close { display: grid; grid-template-columns: minmax(0, 1fr) 78mm; gap: 6mm; margin-top: 4mm; break-inside: avoid; }
+            .in-words { align-self: end; border: 0.3mm solid #cbd5e1; border-radius: 1.5mm; padding: 2.5mm 3mm; background: #f8fafc; }
+            .in-words .party-label { margin-bottom: 0.8mm; }
+            .in-words strong { font-size: 15px; }
+            .totals { width: 100%; border-collapse: collapse; }
+            .totals th { padding: 1.2mm 0; color: #475569; font-weight: 400; text-align: left; }
+            .totals td { padding: 1.2mm 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+            .totals .is-less td { color: #b91c1c; }
+            .totals .is-payable th, .totals .is-payable td { border-top: 0.5mm solid #0f172a; padding-top: 2mm; font-size: 17px; font-weight: 700; }
+            .totals .is-payable th { color: #0f172a; }
+
+            .consent { margin-top: 4mm; border: 0.3mm dashed #94a3b8; border-radius: 1.5mm; padding: 2.5mm 3mm; color: #334155; break-inside: avoid; }
+            .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; margin-top: 6mm; break-inside: avoid; }
+            .sign-title { font-weight: 700; }
+            .sign-line { margin-top: 14mm; border-bottom: 0.3mm dotted #0f172a; }
+            .sign-caption { margin-top: 1.5mm; color: #64748b; font-size: 12px; text-align: center; }
+            .foot { margin-top: 5mm; border-top: 0.2mm solid #e2e8f0; padding-top: 2mm; color: #94a3b8; font-size: 11px; display: flex; justify-content: space-between; }
+        </style></head><body><main class="sheet">
+            <header class="masthead">
+                <div class="brand">
+                    <img src="/images/logo/logo.png" alt="J.S. Sport">
+                    <div>
+                        <div class="brand-name">เจ.เอส.สปอร์ต</div>
+                        <div class="brand-line">สาขา${escapeHtml(order.branch_name || '-')}${order.branch_phone ? ` · โทร ${escapeHtml(order.branch_phone)}` : ''}</div>
+                    </div>
+                </div>
+                <div class="doc">
+                    <div class="doc-title">ใบส่งสินค้า</div>
+                    <div class="doc-sub">Delivery Note</div>
+                    <div class="doc-tags"><span class="tag">ไม่ใช่ใบกำกับภาษี</span><span class="tag is-original">ต้นฉบับ</span></div>
+                </div>
+            </header>
+
+            <section class="parties">
+                <div class="party">
+                    <div class="party-label">ผู้รับสินค้า</div>
+                    <div class="party-name">${escapeHtml(order.customer.name || row.customer_name || '-')}</div>
+                    ${order.customer.phone ? `<p>โทร ${escapeHtml(order.customer.phone)}</p>` : ''}
+                    <p>${escapeHtml(order.shipping_address || '-')}</p>
+                    <p>วิธีส่งมอบ: ${escapeHtml(deliveryMethodLabel(order.delivery_method))}${deliveryDetails ? ` · ${escapeHtml(deliveryDetails)}` : ''}</p>
+                </div>
+                <dl class="facts">
+                    <dt>เลขที่ออเดอร์</dt><dd>${escapeHtml(row.order_code)}</dd>
+                    <dt>วันที่เปิดบิล</dt><dd>${escapeHtml(formatTableDate(row.billing_date))}</dd>
+                    <dt>วันที่ส่งมอบ</dt><dd>${escapeHtml(formatTableDate(row.due_date))}</dd>
+                    <dt>ชื่องาน</dt><dd>${escapeHtml(order.job_name || '-')}</dd>
+                    <dt>ประเภทงาน</dt><dd>${escapeHtml(order.job_type || row.job_type || '-')}</dd>
+                </dl>
+            </section>
+
+            <table class="items">
+                <thead><tr>
+                    <th class="num">#</th><th>รายการ</th><th class="size">ไซส์</th>
+                    <th class="qty">จำนวน</th><th class="price">ราคา/หน่วย</th><th class="amount">จำนวนเงิน</th>
+                </tr></thead>
+                <tbody>
+                    ${
+                        noteLines.length === 0
+                            ? `<tr><td class="num">1</td><td class="name">${escapeHtml(order.job_type || row.job_type || '-')}: ${escapeHtml(order.job_name || '-')}</td><td class="size dash">-</td><td class="qty money">${(row.order_item_count ?? 0).toLocaleString('th-TH')}</td><td class="price dash">-</td><td class="amount money">${formatMoney(order.pricing.net_amount)}</td></tr>`
+                            : noteLines
+                                  .map(
+                                      (
+                                          line,
+                                          index,
+                                      ) => `<tr class="${line.size === '' && line.quantity === '' ? 'is-charge' : ''}">
+                            <td class="num">${index + 1}</td>
+                            <td class="name">${escapeHtml(line.name)}</td>
+                            <td class="size">${line.size === '' ? '<span class="dash">-</span>' : escapeHtml(line.size)}</td>
+                            <td class="qty money">${line.quantity === '' ? '<span class="dash">-</span>' : line.quantity}</td>
+                            <td class="price money">${line.unitPrice === '' ? '<span class="dash">-</span>' : line.unitPrice}</td>
+                            <td class="amount money">${formatMoney(line.total)}</td>
+                        </tr>`,
+                                  )
+                                  .join('')
+                    }
+                    <!-- One figure, used here and in the summary below:
+                         a note that states two different totals is one
+                         the customer is entitled to argue with. The
+                         lines above are the bill's own goods and
+                         charges, which is what this adds up to. -->
+                    <tr class="count-row">
+                        <td colspan="3">รวม ${noteLines.length.toLocaleString('th-TH')} รายการ</td>
+                        <td class="qty money">${notePieces.toLocaleString('th-TH')}</td>
+                        <td class="price"></td>
+                        <td class="amount money">${formatMoney(noteTotals.gross)}</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="fill"></div>
+
+            <section class="close">
+                <div class="in-words">
+                    <div class="party-label">จำนวนเงินเป็นตัวอักษร</div>
+                    <strong>(${escapeHtml(bahtText(noteTotals.payable))})</strong>
+                </div>
+                <table class="totals">
+                    ${summaryRow('รวมเป็นเงิน', formatMoney(noteTotals.gross))}
+                    ${noteTotals.billDiscountPercent > 0 ? summaryRow(`ส่วนลดตามบิล ${noteTotals.billDiscountPercent}%`, `- ${formatMoney(noteTotals.billDiscountAmount)}`, 'is-less') : ''}
+                    ${noteTotals.billDiscountPercent > 0 ? summaryRow('ยอดสุทธิตามบิล', formatMoney(noteTotals.billNet)) : ''}
+                    ${noteTotals.discountPercent > 0 ? summaryRow(`ส่วนลดใบส่งของ ${noteTotals.discountPercent}%`, `- ${formatMoney(noteTotals.discountAmount)}`, 'is-less') : ''}
+                    ${summaryRow('ยอดที่ต้องชำระ', formatMoney(noteTotals.payable), 'is-payable')}
+                </table>
+            </section>
+
+            <div class="consent">ได้รับสินค้าตามรายการข้างบนนี้ไว้ถูกต้องครบถ้วนแล้ว</div>
+
+            <section class="signatures">
+                <div>
+                    <div class="sign-title">ผู้ส่งสินค้า</div>
+                    <div class="sign-line"></div>
+                    <div class="sign-caption">${escapeHtml(deliveryInfo?.sender_signature || '(ลงชื่อ)')} · วันที่ ${escapeHtml(formatTableDate(row.due_date))}</div>
+                </div>
+                <div>
+                    <div class="sign-title">ผู้รับสินค้า</div>
+                    <div class="sign-line"></div>
+                    <div class="sign-caption">(ลงชื่อ) · วันที่ ............/............/............</div>
+                </div>
+            </section>
+
+            <footer class="foot"><span>${escapeHtml(row.order_code)} · ${escapeHtml(order.customer.name || row.customer_name || '-')}</span><span>เอกสารนี้ไม่ใช่ใบกำกับภาษี</span></footer>
         </main></body></html>`);
         printWindow.document.close();
         printWindow.focus();
@@ -3315,99 +3771,27 @@ export default function Counter({
             return;
         }
 
-        const keeperColor = (order.individual_keeper_color ?? '').trim();
-        const hasPants = people.some(
-            (person) =>
-                (person.pants_size ?? '').trim() !== '' ||
-                (person.pants_number ?? '').trim() !== '',
-        );
-        const sleeves = summarizePersonLengths(
-            people.map((person) => person.shirt_style),
-            SHIRT_STYLE_PERSON_LABELS,
-        );
-        const legs = summarizePersonLengths(
-            hasPants ? people.map((person) => person.pants_style) : [],
-            PANTS_STYLE_PERSON_LABELS,
-        );
-        // Only a mixed list earns a column; a whole team in one length is said
-        // once in the header instead of repeated down every row.
-        const showSleeveColumn = sleeves.mixed;
-        const showLegColumn = legs.mixed;
-        const rosterColumnCount =
-            7 +
-            (hasPants ? 2 : 0) +
-            (showSleeveColumn ? 1 : 0) +
-            (showLegColumn ? 1 : 0);
-        const cell = (value: string | undefined): string => {
-            const text = (value ?? '').trim();
-
-            return text === '' || text === '-'
-                ? '<span class="r-blank">·</span>'
-                : escapeHtml(text);
-        };
-
-        const bodyRows = people
-            .map((person, index) => {
-                const isKeeper = person.role === 'keeper';
-
-                return `<tr class="${isKeeper ? 'is-keeper' : ''}">
-                    <td class="r-index">${index + 1}</td>
-                    <td class="r-role">${isKeeper ? 'ผู้รักษาประตู' : 'ผู้เล่น'}</td>
-                    <td class="r-group">${person.size_group === 'kids' ? 'เด็ก' : 'ผู้ใหญ่'}</td>
-                    <td class="r-size">${cell(person.size)}</td>
-                    <td class="r-name">${cell(person.name)}</td>
-                    <td class="r-num">${cell(person.number)}</td>
-                    ${showSleeveColumn ? `<td class="r-len${person.shirt_style === 'long' ? ' is-long' : ''}">${escapeHtml(sleeves.labelOf(person.shirt_style))}</td>` : ''}
-                    ${hasPants ? `<td class="r-size">${cell(person.pants_size)}</td><td class="r-num">${cell(person.pants_number)}</td>` : ''}
-                    ${showLegColumn ? `<td class="r-len${person.pants_style === 'long' ? ' is-long' : ''}">${escapeHtml(legs.labelOf(person.pants_style))}</td>` : ''}
-                    <td class="r-check"></td>
-                </tr>`;
-            })
-            .join('');
-
-        const keeperCount = people.filter(
-            (person) => person.role === 'keeper',
-        ).length;
-        // The same masthead the work receipt prints, so the two sheets read as
-        // one document family instead of two systems.
-        const branchHeaderColor = resolveBranchHeaderColor(
-            order.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
-        );
-        const barcodeMarkup = createOrderCodeBarcodeSvg(order.order_code);
-        const mastheadMarkup = `
-            <div class="masthead">
-                <div class="masthead-bar">
-                    <span class="masthead-title">ใบรายชื่อสกรีน</span>
-                    <span class="masthead-code">${escapeHtml(order.order_code)}</span>
-                </div>
-                <div class="masthead-body">
-                    <div class="masthead-logo"><img src="/images/logo/logo.png" alt="logo" /></div>
-                    <div class="masthead-company">
-                        <div class="company-title">เจ.เอส.สปอร์ต</div>
-                        <div class="subtitle">กรุณาตรวจสอบรายชื่อ ไซซ์ และเบอร์ ให้ถูกต้องก่อนเซ็นรับ</div>
-                    </div>
-                    <div class="masthead-branch">
-                        <div><span class="branch-label">สาขา</span> ${escapeHtml(order.branch_name || '-')}</div>
-                        <div class="small">โทร: ${escapeHtml(order.customer.phone || '-')}</div>
-                        <div class="barcode-wrap">
-                            ${barcodeMarkup || `<div class="barcode-fallback">${escapeHtml(order.order_code)}</div>`}
-                        </div>
-                    </div>
-                </div>
-                <div class="masthead-job">
-                    <div><span class="job-label">ชื่อหน่วยงาน, ชื่องาน</span> <span class="job-value">${escapeHtml(order.job_name || '-')}</span></div>
-                    <div><span class="job-label">ลูกค้า</span> <span class="job-value">${escapeHtml(order.customer.name || '-')}</span></div>
-                    <div><span class="job-label">วันที่ต้องส่ง</span> <span class="job-value is-date">${escapeHtml(formatTableDate(order.due_date ?? ''))}</span></div>
-                </div>
-                <div class="masthead-roster">
-                    <span>รวม <strong>${people.length.toLocaleString('th-TH')}</strong> รายชื่อ</span>
-                    ${keeperCount > 0 ? `<span>ผู้รักษาประตู <strong>${keeperCount.toLocaleString('th-TH')}</strong> คน</span>` : ''}
-                    ${sleeves.caption !== '' ? `<span class="r-length-note">${escapeHtml(sleeves.caption)}</span>` : ''}
-                    ${legs.caption !== '' ? `<span class="r-length-note">${escapeHtml(legs.caption)}</span>` : ''}
-                    ${keeperColor !== '' ? `<span class="r-keeper-note">เสื้อผู้รักษาประตู: ${escapeHtml(keeperColor)}</span>` : ''}
-                </div>
-            </div>`;
+        // Built by the module the floor's copy is built by, so the sheet the
+        // customer checks and the sheet the press works from are the same
+        // document down to the column order.
+        const html = buildScreenRosterHtml({
+            orderCode: order.order_code,
+            jobName: order.job_name ?? '',
+            customerName: order.customer.name ?? '',
+            customerPhone: order.customer.phone,
+            branchName: order.branch_name ?? '',
+            branchPhone: order.branch_phone,
+            branchHeaderColor: resolveBranchHeaderColor(
+                order.branch_header_color,
+            ),
+            dueDateLabel: formatTableDate(order.due_date ?? ''),
+            postponedFromLabel: order.postponed_from
+                ? thaiDate(order.postponed_from)
+                : null,
+            keeperColor: order.individual_keeper_color,
+            barcodeMarkup: createOrderCodeBarcodeSvg(order.order_code),
+            people,
+        });
 
         const printWindow = window.open('', '_blank', 'width=900,height=1100');
 
@@ -3415,120 +3799,7 @@ export default function Counter({
             return;
         }
 
-        printWindow.document.write(`
-            <html>
-                <head>
-                    <meta charset="utf-8" />
-                    <meta name="viewport" content="width=device-width, initial-scale=1" />
-                    <title>ใบรายชื่อ ${escapeHtml(order.order_code)}</title>
-                    <style>
-                        @page { size: A4 portrait; margin: 10mm; }
-                        * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                        /* Paint the ground explicitly: a print window that inherits
-                           a dark scheme would otherwise render white cells dark and
-                           swallow the names. */
-                        body { margin: 0; background: #ffffff; font-family: "Noto Sans Thai", Arial, sans-serif; color: #0f172a; font-size: 12px; }
-                        td { background: #ffffff; }
-                        table { width: 100%; border-collapse: collapse; }
-                        /* thead repeats on every printed page, so the bill it
-                           belongs to travels with each loose sheet. */
-                        thead { display: table-header-group; }
-                        tr { page-break-inside: avoid; }
-                        .r-caption td { border: none; padding: 0 0 5px; background: #ffffff; }
-                        /* The work receipt's masthead, used as-is so the two sheets
-                           read as one document instead of two systems. */
-                        .masthead { border: 1px solid ${branchHeaderColor}; }
-                        .masthead-bar { background: ${branchHeaderColor}; color: #ffffff; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 3px 7px; }
-                        .masthead-title { font-size: 14px; font-weight: 700; letter-spacing: 0.03em; }
-                        .masthead-code { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; opacity: 0.92; }
-                        .masthead-body { display: grid; grid-template-columns: 38mm minmax(0, 1fr) 46mm; align-items: center; gap: 6px; padding: 3px 7px; }
-                        .masthead-logo { height: 15mm; overflow: hidden; }
-                        .masthead-logo img { display: block; width: 100%; height: 100%; object-fit: cover; }
-                        .masthead-company { text-align: center; min-width: 0; }
-                        .company-title { font-size: 15px; font-weight: 800; color: #E21E26; line-height: 1.05; }
-                        .subtitle { font-size: 9px; color: #374151; margin-top: 1px; line-height: 1.15; }
-                        .masthead-branch { font-size: 10px; line-height: 1.2; }
-                        .masthead-branch .branch-label { color: #E21E26; font-weight: 700; }
-                        /* Sized the same way as the work sheet's masthead: the
-                           customer and the due date get the width their text needs
-                           and the job name takes what is left, rather than fixed
-                           fractions that starve one cell while another keeps half a
-                           column of white. Each track can still give way when every
-                           field is long, the job name first. */
-                        .masthead-job { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, max-content) max-content; gap: 6px; align-items: baseline; border-top: 1px solid ${branchHeaderColor}; padding: 2px 7px 3px; }
-                        .masthead-job > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-                        .job-label { font-size: 9px; color: ${branchHeaderColor}; font-weight: 700; }
-                        .job-value { font-size: 13px; color: #111827; font-weight: 800; }
-                        .job-value.is-date { color: #E21E26; }
-                        .barcode-wrap { margin-top: 2px; border: 1px solid #000000; padding: 1px; text-align: center; }
-                        .barcode-wrap svg { display: block; width: 100%; height: 8mm; }
-                        .barcode-fallback { margin-top: 2px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; }
-                        .masthead-roster { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border-top: 1px solid ${branchHeaderColor}; padding: 3px 7px; font-size: 11px; color: #334155; }
-                        .masthead-roster strong { color: #0f172a; font-size: 13px; }
-                        .r-keeper-note { border: 1px solid #f59e0b; background: #fffbeb; color: #92400e; border-radius: 4px; padding: 0 6px; font-weight: 700; }
-                        th, td { border: 0.3mm solid #94a3b8; padding: 4px 6px; }
-                        th { background: #1e3a8a; color: #ffffff; font-weight: 700; }
-                        tbody tr:nth-child(even) td { background: #f8fafc; }
-                        tbody tr.is-keeper td { background: #fffbeb; }
-                        tbody tr.is-keeper .r-role { font-weight: 700; color: #92400e; }
-                        .r-index { width: 8%; text-align: center; color: #64748b; }
-                        .r-role { width: 14%; }
-                        .r-group { width: 10%; text-align: center; }
-                        .r-size { width: 10%; text-align: center; font-weight: 700; }
-                        .r-name { width: 26%; }
-                        .r-num { width: 10%; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
-                        .r-check { width: 9%; }
-                        /* nowrap so a length never breaks across two lines: the
-                           table lays out automatically, so the column takes the
-                           width it needs and the name column gives it up. */
-                        .r-len { width: 11%; text-align: center; white-space: nowrap; }
-                        /* Long is the exception on most bills, so it is the one
-                           that gets picked out of the column. */
-                        .r-len.is-long { font-weight: 700; color: #3730a3; }
-                        .r-length-note { border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; border-radius: 4px; padding: 0 6px; font-weight: 700; }
-                        .r-blank { color: #cbd5e1; }
-                        .r-foot { margin-top: 8mm; display: flex; justify-content: space-between; gap: 10mm; }
-                        .r-sign { flex: 1; }
-                        .r-line { margin-top: 14mm; border-bottom: 0.3mm dotted #334155; }
-                        .r-sign-label { margin-top: 2px; text-align: center; color: #475569; }
-                    </style>
-                </head>
-                <body>
-                    <table>
-                        <thead>
-                            <tr class="r-caption">
-                                <td colspan="${rosterColumnCount}">${mastheadMarkup}</td>
-                            </tr>
-                            <tr>
-                                <th>ลำดับ</th>
-                                <th>ประเภท</th>
-                                <th>เด็ก/ผู้ใหญ่</th>
-                                <th>ไซซ์เสื้อ</th>
-                                <th>ชื่อสกรีน</th>
-                                <th>เบอร์เสื้อ</th>
-                                ${showSleeveColumn ? '<th>แขน</th>' : ''}
-                                ${hasPants ? '<th>ไซซ์กางเกง</th><th>เบอร์กางเกง</th>' : ''}
-                                ${showLegColumn ? '<th>ขา</th>' : ''}
-                                <th>ตรวจ</th>
-                            </tr>
-                        </thead>
-                        <tbody>${bodyRows}</tbody>
-                    </table>
-
-                    <div class="r-foot">
-                        <div class="r-sign">
-                            <div class="r-line"></div>
-                            <div class="r-sign-label">ผู้ตรวจสอบรายชื่อ (ลูกค้า)</div>
-                        </div>
-                        <div class="r-sign">
-                            <div class="r-line"></div>
-                            <div class="r-sign-label">วันที่</div>
-                        </div>
-                    </div>
-                    <script>${buildRosterPrintScript()}<\u002Fscript>
-                </body>
-            </html>
-        `);
+        printWindow.document.write(html);
         printWindow.document.close();
         printWindow.focus();
     };
@@ -3541,67 +3812,22 @@ export default function Counter({
         }
 
         const order = sourceOrder.details;
-        const specificationRows = order.specification_display ?? [];
-        const shirtRows =
-            order.spec_sections?.shirt ??
-            specificationRows.filter((row) => !pantsLabels.has(row.label));
-        const pantsRows =
-            order.spec_sections?.pants ??
-            specificationRows.filter((row) => pantsLabels.has(row.label));
         const billingDate = order.billing_date ?? '';
         const dueDate = order.due_date ?? '';
-        const printImages = Array.from(
-            new Set(
-                [
-                    order.artwork_url,
-                    ...(order.shirt_artwork_urls ?? []),
-                    ...(order.pants_artwork_urls ?? []),
-                    ...(order.sports_day_artwork_urls ?? []),
-                    ...(order.pe_uniform_artwork_urls ?? []),
-                    ...(order.reference_designs ?? []),
-                ].filter((url): url is string => Boolean(url)),
-            ),
-        );
+        // Each picture once, even when it was attached to several tables.
+        const printImages = labelArtworkGallery(order.artwork_gallery, [
+            order.artwork_url,
+            ...(order.shirt_artwork_urls ?? []),
+            ...(order.pants_artwork_urls ?? []),
+            ...(order.sports_day_artwork_urls ?? []),
+            ...(order.pe_uniform_artwork_urls ?? []),
+            ...(order.reference_designs ?? []),
+        ]).map((image) => image.url);
+        // Never more than four, and never more columns than pictures.
+        const galleryColumns = Math.min(4, Math.max(printImages.length, 1));
         const customerName =
             order.customer.name || sourceOrder.customer_name || '-';
         const receiverName = sourceOrder.receiver_name || '-';
-        const renderSpecTableRows = (
-            rows: Array<{ label: string; value: string }>,
-        ) => {
-            if (rows.length === 0) {
-                return '<tr><td colspan="4" class="empty-state">—</td></tr>';
-            }
-
-            const cells = layoutSpecPrintCells(rows);
-            const cell = (entry: SpecPrintRow | null | undefined) =>
-                entry
-                    ? `<td class="spec-label">${escapeHtml(entry.label)}</td><td class="spec-value">${escapeHtml(entry.value || '-')}</td>`
-                    : '<td class="spec-label"></td><td class="spec-value"></td>';
-
-            return Array.from(
-                { length: Math.ceil(cells.length / 2) },
-                (_, index) => `
-                    <tr class="spec-row">
-                        ${cell(cells[index * 2])}
-                        ${cell(cells[index * 2 + 1])}
-                    </tr>
-                `,
-            ).join('');
-        };
-
-        const renderSpecSection = (
-            title: string,
-            rows: Array<{ label: string; value: string }>,
-        ) => {
-            return `
-                <div class="spec-section">
-                    <div class="table-title">${title}</div>
-                    <table class="spec-table">
-                        <tbody>${renderSpecTableRows(rows)}</tbody>
-                    </table>
-                </div>
-            `;
-        };
         // A Form 2 bill prints its sizes the same way as every other form:
         // its line items are one shirt or pair of pants per person, which the
         // size tables below add up per size and length. The name list is its
@@ -3688,9 +3914,9 @@ export default function Counter({
             );
 
             const shirtHeading = (style: string): string =>
-                SHIRT_STYLE_COLUMN_LABELS[style] ?? 'เสื้อ';
+                garmentStyleColumnLabel('shirt', style);
             const pantsHeading = (style: string): string =>
-                PANTS_STYLE_COLUMN_LABELS[style] ?? 'กางเกง';
+                garmentStyleColumnLabel('pants', style);
 
             // A row carries one sleeve length and one leg length, so its counts
             // belong to a single column and the others read as empty.
@@ -3829,8 +4055,7 @@ export default function Counter({
          * finds its column without reading it.
          */
         const renderSportsDayMatrix = (matrix: SportsDayMatrix): string => {
-            const themeClass =
-                matrix.sizeGroup === 'kids' ? 'theme-kids' : 'theme-adults';
+            const themeClass = `theme-${matrix.sizeGroup}`;
             const headCells = matrix.houses
                 .map(
                     (house) =>
@@ -3856,11 +4081,10 @@ export default function Counter({
                         `<td class="sd-qty">${total.toLocaleString('th-TH')}</td>`,
                 )
                 .join('');
-            const moneyRow = matrix.houseAmounts
-                .map(
-                    (amount) =>
-                        `<td class="sd-money">${formatMoney(amount)}</td>`,
-                )
+            // Each house's money is not repeated under its column: the amount
+            // per size is on the right, and the total stays at the end.
+            const moneyRow = matrix.houses
+                .map(() => '<td class="sd-blank"></td>')
                 .join('');
 
             return `<div class="size-block ${themeClass} sd-block">
@@ -3888,8 +4112,7 @@ export default function Counter({
          * for.
          */
         const renderGarmentGroup = (group: GarmentSizeGroup): string => {
-            const themeClass =
-                group.sizeGroup === 'kids' ? 'theme-kids' : 'theme-adults';
+            const themeClass = `theme-${group.sizeGroup}`;
             // A dash reads as "nothing here" in a cell, the way the rest of the
             // sheet writes an empty figure; the totals underneath are always a
             // number, because a total of nothing is still nothing owed.
@@ -3996,17 +4219,14 @@ export default function Counter({
                         .filter((markup) => markup !== '')
                         .join('');
 
-        // One block per distinct spec. A bill whose sheets are all sewn the
-        // same way still prints a single block, so the sheet it fits on is
-        // unchanged; only a bill that really does differ prints more.
-        const specBlocks = buildSpecBlocks(
-            order.spec_sections?.batches,
-            shirtRows,
-            pantsRows,
-        );
-        const specTablesMarkup = `<div class="spec-sections${specBlocks.length === 2 ? ' has-two' : ''}">${specBlocks
-            .map((block) => renderSpecSection(block.title, block.rows))
-            .join('')}</div>`;
+        /**
+         * The spec of a bill sold as separate pieces, one card per sheet the
+         * floor sews, written out the way a person would: what it covers and
+         * how many, then pattern and fabric, shape, and what goes on it, label beside value.
+         * A setting that differs between sheets of one garment is marked with
+         * a ▲ as well as a tint, so it still shows on a black-and-white
+         * printer.
+         */
         const totalQuantity = sizeRows.reduce(
             (sum, row) => sum + Number(row.quantity || 0),
             0,
@@ -4017,8 +4237,7 @@ export default function Counter({
         );
         const sizeTableTitle = 'ขนาดผู้ใหญ่ มัธยมต้น/มัธยมปลาย';
         const branchHeaderColor = resolveBranchHeaderColor(
-            order.branch_name,
-            DEFAULT_BRANCH_HEADER_COLOR,
+            order.branch_header_color,
         );
         const sizeTableHeadMarkup = `
                                 <tr>
@@ -4048,7 +4267,14 @@ export default function Counter({
                         * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
                         html, body { margin: 0; padding: 0; background: #ffffff; color: #111827; }
                         body { font-family: 'TH Sarabun New', 'Prompt', 'Noto Sans Thai', Arial, sans-serif; font-size: 11px; line-height: 1.2; }
-                        .page { width: 100%; max-width: ${PRINT_PAGE_WIDTH_MM - PRINT_PAGE_MARGIN_MM * 2}mm; margin: 0 auto; padding: 0; }
+                        /* As tall as the printable page, and laid out so the
+                           closing block can be pushed to the foot of it. On a
+                           short bill the signatures and the warning used to ride
+                           up under the last table with the rest of the paper
+                           blank below them; they belong at the bottom of the
+                           sheet, where someone signing looks for them. */
+                        .page { width: 100%; max-width: ${PRINT_PAGE_WIDTH_MM - PRINT_PAGE_MARGIN_MM * 2}mm; margin: 0 auto; padding: 0; min-height: ${PRINT_PAGE_HEIGHT_MM - PRINT_PAGE_MARGIN_MM * 2 - PRINT_PAGE_SLACK_MM}mm; display: flex; flex-direction: column; }
+                        .sheet-foot { margin-top: auto; }
                         /* One masthead instead of three stacked blocks: a slim
                            title bar, the company row, then the job line. Roughly a
                            third shorter, which goes straight to the artwork. */
@@ -4088,16 +4314,26 @@ export default function Counter({
                            below only touches it when a dense bill would otherwise
                            need a second page. */
                         :root { --artwork-h: ${PRINT_ARTWORK_FIXED_MM}mm; --artwork-col: ${PRINT_ARTWORK_FIXED_MM}mm; --size-font: ${PRINT_SIZE_FONT_PX}px; }
-                        /* Columns are at least as wide as the artwork's full height,
-                           so a square mock-up fills its box instead of sitting small
-                           in a tall grey band. Deliberately --artwork-col and not
-                           --artwork-h: the fitter trims the height on a busy sheet,
-                           and tying the width to it made the columns narrow at the
-                           same time, so the pictures shrank twice over. */
-                        .image-gallery { margin-top: 6px; display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--artwork-col), 1fr)); gap: 8px; }
+                        /* Four across, which is the count the artwork height was
+                           settled on for. It used to be auto-fit over a minimum
+                           column as wide as that height, and 58mm into the 196mm
+                           the margins leave only ever divided three ways — so the
+                           first row came out one picture short of what the rest of
+                           the sheet was measured against. The count is written out
+                           instead, and a bill with fewer pictures than that gets
+                           only the columns it fills rather than empty ones. */
+                        .image-gallery { margin-top: 6px; display: grid; grid-template-columns: repeat(${galleryColumns}, 1fr); gap: 8px; }
                         /* The cap stops a lone artwork from stretching into a banner
                            the width of the sheet with a small picture adrift in it. */
                         .image-card { border: 1px solid #d1d5db; background: #f9fafb; padding: 4px; min-height: var(--artwork-h); max-height: var(--artwork-h); max-width: calc(var(--artwork-col) * 1.6); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+                        /* A bill with nothing attached still says so in the
+                           gallery, drawn as the picture that is missing rather
+                           than written as a line of text — so a sheet handed
+                           over the counter reads at a glance as one with no
+                           artwork, not one whose artwork failed to print. */
+                        .image-card.is-empty { grid-column: 1 / -1; flex-direction: column; gap: 5px; border-style: dashed; border-color: #9ca3af; background: #ffffff; color: #6b7280; }
+                        .image-card.is-empty svg { width: 34px; height: 29px; fill: none; stroke: #9ca3af; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+                        .image-card.is-empty span { font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
                         /* Every picture fills the same box, whatever its proportions:
                            height comes from the card rather than from the file, and
                            object-fit keeps the whole artwork visible without
@@ -4117,6 +4353,7 @@ export default function Counter({
                         .info-grid .span-4 { grid-column: 1 / -1; }
                         .info-grid .label { font-weight: 700; }
                         .info-grid .red { color: #E21E26; font-weight: 700; }
+                        .info-grid .postponed { color: #B45309; font-weight: 600; font-size: 0.92em; }
                         .info-grid .green { color: #16a34a; font-weight: 700; }
                         .info-grid .blue { color: #174395; font-weight: 700; }
                         .info-grid .balance { color: #E21E26; font-weight: 800; font-size: 12px; }
@@ -4134,14 +4371,6 @@ export default function Counter({
                            whole run of specs onto the next one and left the
                            first half empty. Laid out in normal flow they break
                            between blocks, which is where a break belongs. */
-                        .spec-sections { margin-top: 4px; }
-                        .spec-section { min-width: 0; }
-                        .spec-sections > .spec-section + .spec-section { margin-top: 4px; }
-                        .spec-table { width: 100%; border-collapse: collapse; margin-top: 2px; font-size: 12px; table-layout: fixed; }
-                        .spec-table td { border: 1px solid #000000; padding: 2px 3px; vertical-align: middle; line-height: 1.1; }
-                        .spec-row td { text-align: center; }
-                        .spec-label { width: 18%; background: #e0f2fe; font-weight: 700; white-space: nowrap; }
-                        .spec-value { width: 32%; background: #ffffff; }
                         .table-title { background: #174395; color: #ffffff; font-weight: 700; text-align: center; padding: 3px; font-size: 12px; margin-top: 0; }
                         /* Two columns at all times, not only under @media print.
                            The fitter measures this window to decide how much room
@@ -4153,8 +4382,6 @@ export default function Counter({
                         /* Two specs still sit side by side: a pair fits across
                            the sheet and reads as one comparison. Three or more
                            run down the page so they can break between blocks. */
-                        .spec-sections.has-two { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-                        .spec-sections.has-two > .spec-section + .spec-section { margin-top: 0; }
                         .size-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: var(--size-font, ${PRINT_SIZE_FONT_PX}px); }
                         .size-table th, .size-table td { border: 1px solid #000000; padding: 3px 4px; text-align: center; }
                         .size-table th { background: var(--tbl-head, #e0f2fe); font-weight: 700; }
@@ -4189,8 +4416,30 @@ export default function Counter({
                         /* One accent per size group so the whole block -- title bar,
                            header row, subtotals and totals -- reads as a single theme. */
                         .size-block.theme-kids { --tbl-strong: #15803d; --tbl-head: #dcfce7; --tbl-soft: #f0fdf4; }
+                        .size-block.theme-junior { --tbl-strong: #0369a1; --tbl-head: #e0f2fe; --tbl-soft: #f0f9ff; }
                         .size-block.theme-adults { --tbl-strong: #c2410c; --tbl-head: #ffedd5; --tbl-soft: #fff7ed; }
                         .size-block .table-title { background: var(--tbl-strong); }
+
+                        /* ---- Spec per sheet ----
+                           Written the way a person writes a spec out: one card
+                           per thing the floor sews, its name and count in the
+                           heading, then fabric / shape / decoration side by
+                           side, label beside value on dotted rule lines. Values
+                           are left-aligned and set heavier than their labels so
+                           the eye runs down what to make, not what it is called.
+                           A card is never split across pages. */
+                        .spec-sheets { margin-top: 6px; }
+                        .spec-sheets-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border-bottom: 0.5mm solid #111827; padding-bottom: 2px; margin-bottom: 4px; font-size: 13px; font-weight: 800; }
+                        .spec-sheets-legend { font-size: 10px; font-weight: 400; color: #374151; }
+                        .spec-group { min-width: 0; }
+                        .spec-group-title { font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 0.04em; border-bottom: 0.3mm solid #cbd5e1; padding: 2px 0 1px; margin-bottom: 1px; }
+                        .spec-list { width: 100%; border-collapse: collapse; font-size: 12px; }
+                        .spec-list th, .spec-list td { border: 0; border-bottom: 0.25mm dotted #94a3b8; padding: 2px 0; text-align: left; vertical-align: top; }
+                        .spec-list th { width: 40%; padding-right: 6px; font-weight: 400; color: #475569; white-space: nowrap; }
+                        .spec-list td { font-weight: 700; color: #111827; overflow-wrap: anywhere; }
+                        .spec-list tr:last-child th, .spec-list tr:last-child td { border-bottom: 0; }
+                        .is-diff { background: #fde68a; padding: 0 3px; border-radius: 2px; }
+                        .spec-list td.is-diff { padding: 2px 3px; }
                         .empty-state { color: #6b7280; font-style: italic; text-align: center; }
 
                         /* Forms 1 and 4: the shirt list and the trouser list sit
@@ -4223,7 +4472,7 @@ export default function Counter({
                         .signature-line { width: 58%; border-bottom: 1px solid #000000; }
                         .warning-banner { margin-top: 5px; background: #E21E26; color: #ffffff; text-align: center; padding: 4px 5px; font-size: 10px; font-weight: 700; line-height: 1.15; }
                         .small { font-size: 10px; }
-                        tr, td, th, .detail-grid, .info-box, .size-table, .spec-table, .footer-table, .banner-box { page-break-inside: avoid; }
+                        tr, td, th, .detail-grid, .info-box, .size-table, .footer-table, .banner-box { page-break-inside: avoid; }
                         /* The run of size tables is free to break between them.
                            Held together it was one tall block, so a sheet that
                            needed a second page moved the whole run there and
@@ -4243,7 +4492,6 @@ export default function Counter({
 
                         /* A spec is read as a whole: its heading must not sit at
                            the foot of one page with its rows on the next. */
-                        .spec-section { break-inside: avoid; page-break-inside: avoid; }
                         /* A block that does have to break repeats its heading
                            row, so the second page is not a column of figures
                            under nothing. */
@@ -4253,27 +4501,31 @@ export default function Counter({
                         .section-title, .table-title { break-after: avoid; page-break-after: avoid; }
                         /* The signatures and the warning close the document;
                            they belong together wherever they land. */
-                        .footer-table, .warning-banner { break-inside: avoid; page-break-inside: avoid; }
-                        /* Every page says which bill it belongs to, so a sheet
-                           that gets separated from the rest can be put back. */
+                        .footer-table, .warning-banner, .sheet-foot { break-inside: avoid; page-break-inside: avoid; }
+                        /* The bill names itself once, under the signatures,
+                           where it closes. It used to be repeated at the foot
+                           of every page, drawn out of the flow at a position
+                           worked out from the page height — and the flow knew
+                           nothing about it, so on a bill carrying every size it
+                           was painted over four size rows, and a white
+                           background meant those figures were simply not on the
+                           paper. There is no way to reserve a strip at the foot
+                           of every page of a flow that CSS can honour, and
+                           Chrome counts pages only inside @page rules it does
+                           not support, so the strip is gone rather than wrong. */
                         .page { position: relative; }
-                        .print-runner {
-                            position: absolute;
-                            left: 0;
-                            right: 0;
+                        .sheet-mark {
                             display: flex;
                             justify-content: space-between;
                             gap: 8px;
+                            margin-top: 4px;
                             border-top: 1px solid ${branchHeaderColor};
                             padding: 2px 1px 0;
                             font-size: 9px;
                             color: #4b5563;
-                            background: #ffffff;
                         }
-                        .print-runner strong { color: #111827; }
-                        /* Room for the runner at the foot of every page. */
-                        .page { padding-bottom: 6mm; }
-                        .print-runner-page { font-weight: 700; color: #111827; }
+                        .sheet-mark strong { color: #111827; }
+                        .sheet-mark-end { font-weight: 700; color: #111827; }
                     </style>
                 </head>
                 <body>
@@ -4291,7 +4543,7 @@ export default function Counter({
                                 </div>
                                 <div class="masthead-branch">
                                     <div><span class="branch-label">สาขา</span> ${escapeHtml(order.branch_name || '-')}</div>
-                                    <div class="small">โทร: ${escapeHtml(order.customer.phone || '-')}</div>
+                                    <div class="small">โทร: ${escapeHtml(order.branch_phone || '-')}</div>
                                     <div class="barcode-wrap">
                                         ${barcodeMarkup || `<div class="barcode-fallback">${escapeHtml(order.order_code)}</div>`}
                                     </div>
@@ -4316,7 +4568,15 @@ export default function Counter({
                                 `,
                                           )
                                           .join('')
-                                    : '<div class="image-card" style="grid-column: 1 / -1; color: #6b7280;">[ ไม่มีรูปภาพแนบ ]</div>'
+                                    : `<div class="image-card is-empty">
+                                        <svg viewBox="0 0 48 40" role="img" aria-label="ไม่ได้แนบรูปภาพ">
+                                            <rect x="1.5" y="1.5" width="45" height="37" rx="3" />
+                                            <circle cx="14" cy="13" r="4" />
+                                            <path d="M4 32l11-12 8 8 6-5 15 13z" />
+                                            <line x1="6" y1="35" x2="42" y2="5" />
+                                        </svg>
+                                        <span>ไม่ได้แนบรูปภาพ</span>
+                                    </div>`
                             }
                         </div>
 
@@ -4325,13 +4585,19 @@ export default function Counter({
                             <div class="info-grid">
                                 <div class="span-2"><span class="label">ชื่อหน่วยงาน, ชื่องาน:</span> ${escapeHtml(order.job_name || '-')}</div>
                                 <div><span class="label">ประเภทงาน:</span> ${escapeHtml(order.job_type || '-')}</div>
-                                <div><span class="label">ชื่อลูกค้า:</span> ${escapeHtml(order.customer.name || '-')}</div>
+                                <div><span class="label">ชื่อลูกค้า:</span> ${escapeHtml(order.customer.name || '-')}${order.customer.phone ? ` · โทร ${escapeHtml(order.customer.phone)}` : ''}</div>
                                 <div><span class="label">วันที่สั่งสินค้า:</span> ${escapeHtml(formatTableDate(billingDate))}</div>
-                                <div><span class="label">วันที่รับสินค้า:</span> <span class="red">${escapeHtml(formatTableDate(dueDate))}</span></div>
+                                <div><span class="label">วันที่รับสินค้า:</span> <span class="red">${escapeHtml(formatTableDate(dueDate))}</span>${order.postponed_from ? ` <span class="postponed">(เลื่อนจาก ${escapeHtml(thaiDate(order.postponed_from))})</span>` : ''}</div>
                                 <div><span class="label">ช่องทางติดต่อ:</span> ${escapeHtml(order.customer.line_fb || '-')}</div>
                                 <div><span class="label">จัดส่ง:</span> ${escapeHtml(order.delivery_method ? (order.delivery_method === 'shipping' ? 'ขนส่ง' : order.delivery_method === 'onsite' ? 'หน้างาน' : order.delivery_method === 'pickup' ? 'รับหน้าร้าน' : order.delivery_method) : '-')}</div>
                                 ${order.delivery_method && ['shipping', 'onsite'].includes(order.delivery_method) ? `<div class="span-4"><span class="label">รายละเอียด:</span> ${escapeHtml(order.shipping_address || '-')}</div>` : ''}
                                 <div><span class="label">รวมเป็นเงิน:</span> ${formatMoney(order.pricing.total_amount)}</div>
+                                ${(order.pricing.charges ?? [])
+                                    .map(
+                                        (charge) =>
+                                            `<div><span class="label">${escapeHtml(charge.label)}:</span> ${formatMoney(charge.amount)}</div>`,
+                                    )
+                                    .join('')}
                                 <div><span class="label">ส่วนลด ${order.pricing.discount_percent}%:</span> ${formatMoney(order.pricing.discount_amount)}</div>
                                 <div><span class="label">ยอดรวมหลังลด:</span> <span class="green">${formatMoney(order.pricing.net_amount)}</span></div>
                                 <div><span class="label">ชำระแล้ว:</span> <span class="blue">${formatMoney(order.pricing.paid_amount)}</span></div>
@@ -4354,8 +4620,7 @@ export default function Counter({
                         </table>`
                         }
 
-                        ${specTablesMarkup}
-
+                        <div class="sheet-foot">
                         <table class="footer-table">
                             <tr>
                                 <td style="width:50%;">
@@ -4372,10 +4637,11 @@ export default function Counter({
                         </table>
 
                         <div class="warning-banner">*** หมายเหตุ งานเพิ่มจำนวนไม่ถึง 20 ตัว ไม่ลด % และต้องชำระค่าชุด ที่เพิ่มเติมทั้งหมดก่อนเปิดออเดอร์ ***</div>
-                        <div class="print-runner">
-                            <span>ใบรับงาน <strong>${escapeHtml(order.order_code)}</strong></span>
-                            <span>${escapeHtml(order.job_name || '-')}</span>
-                            <span class="print-runner-page"></span>
+                            <div class="sheet-mark">
+                                <span>ใบรับงาน <strong>${escapeHtml(order.order_code)}</strong></span>
+                                <span>${escapeHtml(order.job_name || '-')}</span>
+                                <span class="sheet-mark-end">— จบเอกสาร —</span>
+                            </div>
                         </div>
                     </div>
                     <script>${buildPrintFitScript()}<\u002Fscript>
@@ -4445,8 +4711,31 @@ export default function Counter({
                             type="button"
                             className="h-9 bg-[#E21E26] text-xs text-white hover:bg-[#C91820]"
                             onClick={() => {
-                                handlePrintDocument(justSavedOrder);
+                                // Close first, open second, and let the browser
+                                // paint in between.
+                                //
+                                // The print window shares this page's renderer,
+                                // and the print dialog it raises blocks the lot.
+                                // On a bill with no artwork there is nothing to
+                                // wait for, so the window printed the instant it
+                                // was written — inside this handler, before the
+                                // line below had run. Everything froze with this
+                                // dialog still on the screen and neither of its
+                                // buttons answering, until someone dismissed the
+                                // printer. A bill carrying pictures waited for
+                                // them to load and closed cleanly, which is why
+                                // it only happened to some bills.
                                 setPrintOfferDismissed(true);
+                                // Two frames: the first is the one React's
+                                // close is committed into, the second runs once
+                                // it has actually been painted. One frame
+                                // leaves the dialog still drawn on a screen
+                                // that is about to stop repainting.
+                                requestAnimationFrame(() => {
+                                    requestAnimationFrame(() => {
+                                        handlePrintDocument(justSavedOrder);
+                                    });
+                                });
                             }}
                         >
                             <Printer className="size-4" />
@@ -4463,6 +4752,49 @@ export default function Counter({
                 // The branch filter only lists more than one branch for head
                 // office, which is exactly who may see other branches' jobs.
                 showBranch={branches.length > 1}
+                onReschedule={(order) =>
+                    setRescheduleTarget({
+                        id: order.id,
+                        orderCode: order.order_code,
+                        dueDate: order.due_date ?? '',
+                        quantity: order.quantity,
+                        jobName: order.job_name,
+                    })
+                }
+            />
+
+            <RescheduleDeliveryDialog
+                key={`reschedule-${rescheduleTarget?.id ?? 'none'}`}
+                target={rescheduleTarget}
+                today={deliveryCalendar.today}
+                loads={deliveryDateLoads}
+                dailyCapacity={dailyProductionCapacity}
+                onClose={() => setRescheduleTarget(null)}
+            />
+
+            {/* Keyed by bill: opening a second one starts from its own
+                pictures rather than the previous bill's unsaved edits. */}
+            <UpdateArtworkDialog
+                key={`artwork-${artworkTarget?.id ?? 'none'}`}
+                target={artworkTarget}
+                onClose={() => setArtworkTarget(null)}
+            />
+
+            {/* Keyed by bill so the discount box opens on the saved figure
+                rather than the previous bill's unsaved one. */}
+            <DeliveryNoteDialog
+                key={`note-${deliveryNoteTarget?.id ?? 'none'}`}
+                target={deliveryNoteTarget}
+                onClose={() => setDeliveryNoteTarget(null)}
+                onPrint={(percent) => {
+                    const row = orders.find(
+                        (order) => order.id === deliveryNoteTarget?.id,
+                    );
+
+                    if (row) {
+                        handlePrintDeliveryNote(row, percent);
+                    }
+                }}
             />
 
             <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -4702,10 +5034,12 @@ export default function Counter({
                             onPageChange={handlePageChange}
                             onOpenDetail={setSelectedOrder}
                             onOpenTimeline={setTimelineOrder}
-                            onOpenPdf={handlePrintDeliveryNote}
+                            onOpenPdf={openDeliveryNote}
                             isAdmin={isAdmin}
                             onDuplicate={handleDuplicateOrder}
                             onDelete={setPendingDelete}
+                            onReschedule={rescheduleRow}
+                            onUpdateArtwork={artworkRow}
                         />
                     </section>
                 </div>
@@ -4760,6 +5094,7 @@ export default function Counter({
                         <div className="sticky top-0 z-20">
                             <WorkReceiptTopBar
                                 orderCode={selectedOrder.details.order_code}
+                                branchName={selectedOrder.details.branch_name}
                                 onPrint={handlePrintDocument}
                                 onClose={() => setSelectedOrder(null)}
                                 actions={
@@ -4786,7 +5121,7 @@ export default function Counter({
                         <div ref={printRef} className="space-y-3 p-3 md:p-4">
                             <WorkReceiptBillHeader
                                 branchName={selectedOrder.details.branch_name}
-                                phone={selectedOrder.details.customer.phone}
+                                phone={selectedOrder.details.branch_phone}
                             />
 
                             <div className="grid gap-3 md:grid-cols-[1fr_320px]">
@@ -4796,22 +5131,34 @@ export default function Counter({
                                     </h3>
                                     {detailImages.length > 0 ? (
                                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                                            {detailImages.map((url, index) => (
-                                                <div
-                                                    key={`${url}-${index}`}
-                                                    className="overflow-hidden rounded-md border border-slate-200 bg-slate-50"
-                                                >
-                                                    <img
-                                                        src={url}
-                                                        alt={`attachment-${index + 1}`}
-                                                        className="h-44 w-full bg-slate-50 object-contain"
-                                                        onError={(event) => {
-                                                            event.currentTarget.style.display =
-                                                                'none';
-                                                        }}
-                                                    />
-                                                </div>
-                                            ))}
+                                            {detailImages.map(
+                                                (image, index) => (
+                                                    <div
+                                                        key={image.url}
+                                                        className="overflow-hidden rounded-md border border-slate-200 bg-slate-50"
+                                                    >
+                                                        <img
+                                                            src={image.url}
+                                                            alt={`attachment-${index + 1}`}
+                                                            className="h-44 w-full bg-slate-50 object-contain"
+                                                            onError={(
+                                                                event,
+                                                            ) => {
+                                                                event.currentTarget.style.display =
+                                                                    'none';
+                                                            }}
+                                                        />
+                                                        {image.labels.length >
+                                                        0 ? (
+                                                            <p className="border-t border-slate-200 bg-white px-2 py-1 text-[11px] leading-snug font-semibold text-slate-700">
+                                                                {image.labels.join(
+                                                                    ', ',
+                                                                )}
+                                                            </p>
+                                                        ) : null}
+                                                    </div>
+                                                ),
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="flex h-64 items-center justify-center rounded-md border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-400">
@@ -4837,6 +5184,10 @@ export default function Counter({
                                                 ชื่อลูกค้า:{' '}
                                                 {selectedOrder.details.customer
                                                     .name || '-'}
+                                                {selectedOrder.details.customer
+                                                    .phone
+                                                    ? ` · โทร ${selectedOrder.details.customer.phone}`
+                                                    : ''}
                                             </p>
                                             <p>
                                                 ประเภทงาน:{' '}
@@ -4845,15 +5196,32 @@ export default function Counter({
                                             </p>
                                             <p>
                                                 วันที่เปิดบิล:{' '}
-                                                {selectedOrder.details
-                                                    .billing_date || '-'}
+                                                {billDateText(
+                                                    selectedOrder.details
+                                                        .billing_date,
+                                                    true,
+                                                )}
                                             </p>
                                             <p>
                                                 วันที่รับสินค้า:{' '}
                                                 <span className="font-semibold text-[#E21E26]">
-                                                    {selectedOrder.details
-                                                        .due_date || '-'}
+                                                    {billDateText(
+                                                        selectedOrder.details
+                                                            .due_date,
+                                                    )}
                                                 </span>
+                                                {selectedOrder.details
+                                                    .postponed_from ? (
+                                                    <span className="ml-1 text-xs font-semibold text-amber-700">
+                                                        (เลื่อนจาก{' '}
+                                                        {thaiDate(
+                                                            selectedOrder
+                                                                .details
+                                                                .postponed_from,
+                                                        )}
+                                                        )
+                                                    </span>
+                                                ) : null}
                                             </p>
                                             <p>
                                                 ช่องทางติดต่อ:{' '}
@@ -4906,6 +5274,24 @@ export default function Counter({
                                                     )}
                                                 </span>
                                             </div>
+                                            {(
+                                                selectedOrder.details.pricing
+                                                    .charges ?? []
+                                            ).map((charge, index) => (
+                                                <div
+                                                    key={`${charge.label}-${index}`}
+                                                    className="flex justify-between text-slate-600"
+                                                >
+                                                    <span className="truncate pr-2">
+                                                        {charge.label}
+                                                    </span>
+                                                    <span>
+                                                        {formatMoney(
+                                                            charge.amount,
+                                                        )}
+                                                    </span>
+                                                </div>
+                                            ))}
                                             <div className="flex justify-between">
                                                 <span>ส่วนลด %</span>
                                                 <span className="font-semibold">
@@ -5098,16 +5484,13 @@ export default function Counter({
                                     <div className="space-y-3">
                                         {dialogSportsDayMatrices.map(
                                             (matrix) => {
-                                                const isKids =
-                                                    matrix.sizeGroup === 'kids';
-
                                                 return (
                                                     <div
                                                         key={`${matrix.sizeGroup}-${matrix.garment}`}
-                                                        className={`overflow-hidden rounded-xl border shadow-sm ${isKids ? 'border-emerald-200' : 'border-orange-200'}`}
+                                                        className={`overflow-hidden rounded-xl border shadow-sm ${SIZE_TIER_CARD_CLASSES[matrix.sizeGroup]}`}
                                                     >
                                                         <div
-                                                            className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs font-bold text-white ${isKids ? 'bg-emerald-700' : 'bg-orange-700'}`}
+                                                            className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs font-bold text-white ${SIZE_TIER_HEAD_CLASSES[matrix.sizeGroup]}`}
                                                         >
                                                             <span>
                                                                 {matrix.title}
@@ -5269,25 +5652,20 @@ export default function Counter({
                                                                         <td className="border border-slate-300 px-2.5 py-1 text-slate-800">
                                                                             รวมเงิน
                                                                         </td>
-                                                                        {matrix.houseAmounts.map(
+                                                                        {/* Each house's money is not repeated
+                                                                            under its column: the amount per size
+                                                                            is on the right, and the total stays at
+                                                                            the end. */}
+                                                                        {matrix.houses.map(
                                                                             (
-                                                                                amount,
-                                                                                index,
+                                                                                house,
                                                                             ) => (
                                                                                 <td
                                                                                     key={
-                                                                                        matrix
-                                                                                            .houses[
-                                                                                            index
-                                                                                        ]
-                                                                                            .name
+                                                                                        house.name
                                                                                     }
-                                                                                    className="border border-slate-300 px-2.5 py-1 text-right font-mono text-slate-900"
-                                                                                >
-                                                                                    {formatMoney(
-                                                                                        amount,
-                                                                                    )}
-                                                                                </td>
+                                                                                    className="border border-slate-300 px-2.5 py-1"
+                                                                                />
                                                                             ),
                                                                         )}
                                                                         <td
@@ -5524,23 +5902,27 @@ export default function Counter({
                                 )}
                             </section>
 
-                            <div
-                                className={`grid items-stretch gap-3 ${specBlocks.length > 1 ? 'lg:grid-cols-2' : ''}`}
-                            >
-                                {specBlocks.map((block) => (
-                                    <SpecTable
-                                        key={block.title}
-                                        title={block.title}
-                                        rows={block.rows}
-                                        accent={
-                                            block.title.includes('กางเกง')
-                                                ? 'red'
-                                                : 'blue'
-                                        }
-                                        split={specBlocks.length === 1}
-                                    />
-                                ))}
-                            </div>
+                            {dialogSpecSheets !== null ? (
+                                <GarmentSpecCards sheets={dialogSpecSheets} />
+                            ) : (
+                                <div
+                                    className={`grid items-stretch gap-3 ${specBlocks.length > 1 ? 'lg:grid-cols-2' : ''}`}
+                                >
+                                    {specBlocks.map((block) => (
+                                        <SpecTable
+                                            key={block.title}
+                                            title={block.title}
+                                            rows={block.rows}
+                                            accent={
+                                                block.title.includes('กางเกง')
+                                                    ? 'red'
+                                                    : 'blue'
+                                            }
+                                            split={specBlocks.length === 1}
+                                        />
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -5593,9 +5975,49 @@ export default function Counter({
                                             timelineOrder?.due_date ?? '',
                                         )}
                                     </span>
+                                    {timelineOrder?.details?.postponed_from ? (
+                                        <span className="ml-1 text-xs font-semibold text-amber-700">
+                                            (เลื่อนจาก{' '}
+                                            {thaiDate(
+                                                timelineOrder.details
+                                                    .postponed_from,
+                                            )}
+                                            )
+                                        </span>
+                                    ) : null}
                                 </p>
                             </div>
                         </div>
+
+                        {(timelineOrder?.details?.due_date_changes ?? [])
+                            .length > 0 ? (
+                            <section className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+                                <h3 className="mb-2 text-sm font-bold text-amber-900">
+                                    ประวัติการเลื่อนส่ง
+                                </h3>
+                                <ol className="space-y-2">
+                                    {(
+                                        timelineOrder?.details
+                                            ?.due_date_changes ?? []
+                                    ).map((change, index) => (
+                                        <li
+                                            key={`${change.at}-${index}`}
+                                            className="rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-slate-700"
+                                        >
+                                            <p className="font-semibold text-slate-900">
+                                                {thaiDate(change.from)} →{' '}
+                                                {thaiDate(change.to)}
+                                            </p>
+                                            <p>เหตุผล: {change.reason}</p>
+                                            <p className="text-slate-500">
+                                                โดย {change.by} ·{' '}
+                                                {billDateText(change.at, true)}
+                                            </p>
+                                        </li>
+                                    ))}
+                                </ol>
+                            </section>
+                        ) : null}
 
                         <div className="space-y-3">
                             {[...(timelineOrder?.details?.routings ?? [])]

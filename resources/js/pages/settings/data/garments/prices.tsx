@@ -18,6 +18,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import { styleLabelsOf } from '@/pages/Orders/garmentTables';
 
 type GarmentCategory = 'SHIRT' | 'PANTS';
 
@@ -42,8 +43,6 @@ type PriceRow = {
     child_price: string;
     adult_price: string;
     /** Empty when this step costs the same for long sleeves or long legs. */
-    child_price_long: string | null;
-    adult_price_long: string | null;
     is_active: boolean;
     display_order: number;
     created_at: string;
@@ -65,8 +64,6 @@ type FormState = {
     name: string;
     child_price: string;
     adult_price: string;
-    child_price_long: string;
-    adult_price_long: string;
     display_order: string;
     is_active: boolean;
 };
@@ -76,8 +73,6 @@ const INITIAL_FORM: FormState = {
     name: '',
     child_price: '0.00',
     adult_price: '0.00',
-    child_price_long: '',
-    adult_price_long: '',
     display_order: '0',
     is_active: true,
 };
@@ -157,8 +152,8 @@ export default function GarmentPricesPage() {
         const category = selectedGarmentTypeCategory ?? 'SHIRT';
         const isPants = category === 'PANTS';
         const labels: Record<string, string> = isPants
-            ? { short: 'ขาสั้น', long: 'ขายาว' }
-            : { short: 'แขนสั้น', long: 'แขนยาว', sleeveless: 'แขนกุด' };
+            ? styleLabelsOf('pants')
+            : styleLabelsOf('shirt');
 
         return {
             category,
@@ -234,14 +229,6 @@ export default function GarmentPricesPage() {
             name: row.name,
             child_price: fmtPrice(row.child_price),
             adult_price: fmtPrice(row.adult_price),
-            child_price_long:
-                row.child_price_long === null
-                    ? ''
-                    : fmtPrice(row.child_price_long),
-            adult_price_long:
-                row.adult_price_long === null
-                    ? ''
-                    : fmtPrice(row.adult_price_long),
             display_order: String(row.display_order),
             is_active: row.is_active,
         });
@@ -255,14 +242,6 @@ export default function GarmentPricesPage() {
         const adultPrice = Number.parseFloat(form.adult_price);
         // A blank long price means "same as the short one". It must travel as
         // null, not as 0, which would make the garment free to make.
-        const optionalPrice = (value: string): number | null => {
-            const parsed = Number.parseFloat(value);
-
-            return value.trim() === '' || Number.isNaN(parsed)
-                ? null
-                : Number(parsed.toFixed(2));
-        };
-
         const payload = {
             garment_type_id: garmentTypeId,
             name: form.name.trim(),
@@ -272,8 +251,6 @@ export default function GarmentPricesPage() {
             adult_price: Number.isNaN(adultPrice)
                 ? null
                 : Number(adultPrice.toFixed(2)),
-            child_price_long: optionalPrice(form.child_price_long),
-            adult_price_long: optionalPrice(form.adult_price_long),
             display_order: Number.parseInt(form.display_order || '0', 10) || 0,
             is_active: form.is_active,
         };
@@ -297,16 +274,6 @@ export default function GarmentPricesPage() {
             payload.adult_price < 0
         ) {
             setError('กรุณากรอกราคาเด็กและผู้ใหญ่ให้ถูกต้อง');
-
-            return;
-        }
-
-        if (
-            (payload.child_price_long !== null &&
-                payload.child_price_long < 0) ||
-            (payload.adult_price_long !== null && payload.adult_price_long < 0)
-        ) {
-            setError('ราคาแขนยาว/ขายาวต้องไม่ติดลบ');
 
             return;
         }
@@ -362,14 +329,6 @@ export default function GarmentPricesPage() {
                     adult_price: Number.parseFloat(row.adult_price),
                     // This endpoint replaces the whole row, so the long prices
                     // have to ride along or toggling a row would erase them.
-                    child_price_long:
-                        row.child_price_long === null
-                            ? null
-                            : Number.parseFloat(row.child_price_long),
-                    adult_price_long:
-                        row.adult_price_long === null
-                            ? null
-                            : Number.parseFloat(row.adult_price_long),
                     display_order: row.display_order,
                     is_active: !row.is_active,
                 }),
@@ -586,26 +545,40 @@ export default function GarmentPricesPage() {
                     </div>
 
                     <div className="overflow-x-auto">
-                        <table className="min-w-full table-fixed divide-y divide-slate-200 text-sm">
+                        {/*
+                            Five of the six columns are a fixed width adding up
+                            to 720px, so the one left over — the garment and
+                            its stitch point — is given whatever remains. On a
+                            narrow window that was 51px, and a rate read as a
+                            five-line ribbon of single syllables.
+
+                            table-fixed never lets content push the table
+                            wider, so the wrapper's overflow-x-auto had nothing
+                            to scroll. The floor is what the widest rate
+                            actually measures: 720px of fixed columns, 234px of
+                            text and the cell's own 32px of padding. Below that
+                            the table scrolls sideways, the way a wide table is
+                            read, instead of crushing the one column that
+                            carries the words.
+                        */}
+                        <table className="w-full min-w-[1000px] table-fixed divide-y divide-slate-200 text-sm">
                             <thead className="bg-slate-50">
                                 <tr>
                                     <th className="w-[90px] px-4 py-3 text-left font-semibold text-slate-700">
                                         ลำดับ
                                     </th>
                                     <th className="px-4 py-3 text-left font-semibold text-slate-700">
-                                        ประเภทเสื้อ
+                                        {categoryFilter === 'PANTS'
+                                            ? 'ประเภทกางเกง'
+                                            : categoryFilter === 'SHIRT'
+                                              ? 'ประเภทเสื้อ'
+                                              : 'ประเภทงาน'}
                                     </th>
                                     <th className="w-[120px] px-4 py-3 text-left font-semibold text-slate-700">
                                         เด็ก ราคา
                                     </th>
                                     <th className="w-[120px] px-4 py-3 text-left font-semibold text-slate-700">
-                                        เด็ก แขนยาว/ขายาว
-                                    </th>
-                                    <th className="w-[120px] px-4 py-3 text-left font-semibold text-slate-700">
                                         ผู้ใหญ่ ราคา
-                                    </th>
-                                    <th className="w-[120px] px-4 py-3 text-left font-semibold text-slate-700">
-                                        ผู้ใหญ่ แขนยาว/ขายาว
                                     </th>
                                     <th className="w-[160px] px-4 py-3 text-left font-semibold text-slate-700">
                                         สถานะ
@@ -635,32 +608,34 @@ export default function GarmentPricesPage() {
                                                 {index + 1}
                                             </td>
                                             <td className="px-4 py-3 align-top text-slate-700">
-                                                <div className="font-medium text-slate-900">
-                                                    {row.garment_type_name}
-                                                </div>
-                                                <div className="text-slate-600">
+                                                {/*
+                                                    The row IS a stitch point,
+                                                    so it reads as one line
+                                                    with the garment in front
+                                                    of it. Split over two
+                                                    lines, the stitch point sat
+                                                    underneath in the dimmer
+                                                    grey and the garment read
+                                                    as the heading of a group
+                                                    that was not there.
+                                                */}
+                                                <div className="text-base leading-snug font-semibold text-slate-900">
+                                                    {/*
+                                                        One string, so the
+                                                        spaces around the colon
+                                                        survive formatting.
+                                                    */}
+                                                    <span className="font-medium text-slate-500">
+                                                        {`${row.garment_type_name} : `}
+                                                    </span>
                                                     {row.name}
                                                 </div>
                                             </td>
                                             <td className="px-4 py-3 align-top text-slate-700">
                                                 {fmtPrice(row.child_price)}
                                             </td>
-                                            <td className="px-4 py-3 align-top text-slate-500">
-                                                {row.child_price_long === null
-                                                    ? 'เท่าราคาสั้น'
-                                                    : fmtPrice(
-                                                          row.child_price_long,
-                                                      )}
-                                            </td>
                                             <td className="px-4 py-3 align-top text-slate-700">
                                                 {fmtPrice(row.adult_price)}
-                                            </td>
-                                            <td className="px-4 py-3 align-top text-slate-500">
-                                                {row.adult_price_long === null
-                                                    ? 'เท่าราคาสั้น'
-                                                    : fmtPrice(
-                                                          row.adult_price_long,
-                                                      )}
                                             </td>
                                             <td className="px-4 py-3 align-top">
                                                 <Button
@@ -828,75 +803,7 @@ export default function GarmentPricesPage() {
                                     className="bg-white"
                                 />
                             </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-slate-700">
-                                    ราคาเด็ก แขนยาว/ขายาว
-                                </label>
-                                <Input
-                                    type="number"
-                                    min={0}
-                                    step="0.01"
-                                    placeholder="เว้นว่าง = เท่าราคาสั้น"
-                                    value={form.child_price_long}
-                                    onChange={(event) =>
-                                        setForm((prev) => ({
-                                            ...prev,
-                                            child_price_long:
-                                                event.target.value,
-                                        }))
-                                    }
-                                    className="bg-white"
-                                />
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-slate-700">
-                                    ราคาผู้ใหญ่ แขนยาว/ขายาว
-                                </label>
-                                <Input
-                                    type="number"
-                                    min={0}
-                                    step="0.01"
-                                    placeholder="เว้นว่าง = เท่าราคาสั้น"
-                                    value={form.adult_price_long}
-                                    onChange={(event) =>
-                                        setForm((prev) => ({
-                                            ...prev,
-                                            adult_price_long:
-                                                event.target.value,
-                                        }))
-                                    }
-                                    className="bg-white"
-                                />
-                            </div>
                         </div>
-
-                        <p className="text-xs text-slate-500">
-                            ช่องแขนยาว/ขายาวกรอกเฉพาะขั้นตอนที่ค่าแรงต่างจากแบบสั้น
-                            เว้นว่างไว้ระบบจะคิดเท่าราคาสั้นให้เอง
-                        </p>
-
-                        {/*
-                            A zero in a long-sleeve field is read as "this step
-                            is free on a long garment", and the whole sheet then
-                            costs nothing — while its own list of steps still
-                            shows a price, so the sheet contradicts itself. It
-                            is almost always a blank field typed as 0.
-                        */}
-                        {[form.child_price_long, form.adult_price_long].some(
-                            (value) =>
-                                value.trim() !== '' &&
-                                Number.parseFloat(value) === 0,
-                        ) ? (
-                            <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
-                                ใส่ 0 ในช่องแขนยาว/ขายาว
-                                หมายถึงขั้นตอนนี้ไม่คิดค่าแรงเลยเมื่อเป็นแบบยาว
-                                ใบงานจะคิดเป็น 0 บาท —
-                                ถ้าต้องการให้คิดเท่าแบบสั้น
-                                ให้เว้นช่องนี้ว่างไว้
-                            </p>
-                        ) : null}
 
                         <p className="text-xs text-slate-500">
                             ระบบจัดเรียงให้อัตโนมัติ

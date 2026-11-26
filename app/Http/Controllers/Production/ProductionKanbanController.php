@@ -46,6 +46,7 @@ class ProductionKanbanController extends Controller
         $keys = [
             'jssport.shirt-patterns',
             'jssport.shirt-fabrics',
+            'jssport.shirt-neck-styles',
             'jssport.shirt-collars',
             'jssport.shirt-colors',
             'jssport.shirt-fabric-colors',
@@ -157,7 +158,7 @@ class ProductionKanbanController extends Controller
             ['key' => 'pattern_id', 'label' => 'แพทเทิร์น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-patterns']],
             ['key' => 'fabric_id', 'label' => 'เนื้อผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabrics']],
             ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabric-colors', 'jssport.shirt-colors']],
-            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
+            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-styles', 'jssport.shirt-collars']],
             ['key' => 'neck_color_id', 'label' => 'สีแบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors']],
             ['key' => 'collar_id', 'label' => 'ปก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
             ['key' => 'placket_style_id', 'label' => 'แบบสาบ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-plackets']],
@@ -172,7 +173,7 @@ class ProductionKanbanController extends Controller
             ['key' => 'stripe_style_text', 'label' => 'แบบลา', 'type' => 'text'],
             ['key' => 'screen_text', 'label' => 'ข้อความสกรีน', 'type' => 'text'],
             ['key' => 'embroidery_code_text', 'label' => 'รหัสงานปัก', 'type' => 'text'],
-            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดปัก', 'type' => 'text'],
+            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดเพิ่มเติม', 'type' => 'text'],
         ];
     }
 
@@ -195,7 +196,7 @@ class ProductionKanbanController extends Controller
             ['key' => 'stripe_style_text', 'label' => 'แบบลา', 'type' => 'text'],
             ['key' => 'screen_text', 'label' => 'ข้อความสกรีน', 'type' => 'text'],
             ['key' => 'embroidery_code_text', 'label' => 'รหัสงานปัก', 'type' => 'text'],
-            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดปัก', 'type' => 'text'],
+            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดเพิ่มเติม', 'type' => 'text'],
         ];
     }
 
@@ -343,6 +344,8 @@ class ProductionKanbanController extends Controller
         $ordersQuery = Order::with([
             'customer',
             'branch',
+            // So the sheets can note a date that moved after they were printed.
+            'latestDueDateChange',
             'items',
             'routings.cuttingTeam',
             'routings.sewingTeam',

@@ -203,4 +203,116 @@ class SportsDayArtworkTest extends TestCase
                 ->has('order.sports_day_artwork_urls.0', 1)
             );
     }
+
+    /**
+     * A house's pictures are filed by its position. Removing the first house
+     * moves the second up, and its pictures must move with it — they used to
+     * stay behind, so the second house printed the removed house's pictures.
+     */
+    public function test_removing_a_house_takes_its_pictures_and_moves_the_next_house_s_up(): void
+    {
+        $this->actingAs($this->admin())->post('/orders', $this->payload([
+            0 => [UploadedFile::fake()->image('red-1.jpg')],
+            1 => [UploadedFile::fake()->image('blue-1.jpg'), UploadedFile::fake()->image('blue-2.jpg')],
+        ]))->assertSessionHasNoErrors();
+
+        $order = Order::query()->firstOrFail();
+        $red = $order->getMedia('sports_day_artwork')->firstWhere('name', 'red-1');
+        $blue = $order->getMedia('sports_day_artwork')->where('name', '!=', 'red-1')->values();
+
+        $payload = $this->payload([]);
+        $payload['specification']['screen_print_detail'] = json_encode([
+            'schema' => 'spec-v2',
+            'mode' => 'sports_day',
+            'sports_day_groups' => [['team_name' => 'คณะสีน้ำเงิน', 'rows' => []]],
+        ]);
+        $payload['removed_media_ids'] = [$red->id];
+        $payload['sports_day_artwork_houses'] = [$blue[0]->id => 0, $blue[1]->id => 0];
+
+        $this->actingAs($this->admin())->put("/orders/{$order->id}", $payload)->assertSessionHasNoErrors();
+
+        $media = $order->fresh()->getMedia('sports_day_artwork');
+
+        $this->assertCount(2, $media);
+        $this->assertNull($media->firstWhere('name', 'red-1'));
+        $this->assertSame([0, 0], $media->map(fn ($m) => $m->getCustomProperty('sports_day_group'))->values()->all());
+        $this->assertArrayNotHasKey('1', $order->fresh()->sports_day_artwork_urls);
+    }
+
+    public function test_opening_the_bill_again_without_a_house_moves_the_rest_up_on_the_copy_only(): void
+    {
+        $this->actingAs($this->admin())->post('/orders', $this->payload([
+            0 => [UploadedFile::fake()->image('red-1.jpg')],
+            1 => [UploadedFile::fake()->image('blue-1.jpg')],
+        ]))->assertSessionHasNoErrors();
+
+        $source = Order::query()->firstOrFail();
+        $red = $source->getMedia('sports_day_artwork')->firstWhere('name', 'red-1');
+        $blue = $source->getMedia('sports_day_artwork')->firstWhere('name', 'blue-1');
+
+        $payload = $this->payload([]);
+        $payload['duplicate_from_id'] = $source->id;
+        $payload['removed_media_ids'] = [$red->id];
+        $payload['sports_day_artwork_houses'] = [$blue->id => 0];
+
+        $this->actingAs($this->admin())->post('/orders', $payload)->assertSessionHasNoErrors();
+
+        $copy = Order::query()->whereKeyNot($source->id)->firstOrFail();
+        $this->assertCount(1, $copy->sports_day_artwork_urls['0']);
+        $this->assertSame('blue-1', $copy->getMedia('sports_day_artwork')->sole()->name);
+
+        // The bill it was copied from is untouched.
+        $this->assertSame(
+            ['red-1' => 0, 'blue-1' => 1],
+            $source->fresh()->getMedia('sports_day_artwork')
+                ->mapWithKeys(fn ($m) => [$m->name => $m->getCustomProperty('sports_day_group')])->all(),
+        );
+    }
+
+    public function test_a_house_position_out_of_range_is_refused(): void
+    {
+        $payload = $this->payload([]);
+        $payload['sports_day_artwork_houses'] = [1 => 500];
+
+        $this->actingAs($this->admin())->post('/orders', $payload)
+            ->assertSessionHasErrors('sports_day_artwork_houses.1');
+    }
+
+    public function test_the_overview_names_each_house_s_pictures_once(): void
+    {
+        $this->actingAs($this->admin())->post('/orders', $this->payload([
+            0 => [UploadedFile::fake()->image('red-1.jpg')],
+            1 => [UploadedFile::fake()->image('blue-1.jpg')],
+        ]))->assertSessionHasNoErrors();
+
+        $gallery = Order::query()->firstOrFail()->artwork_gallery;
+
+        $this->assertCount(2, $gallery);
+        $this->assertSame([['sports_day_0'], ['sports_day_1']], array_column($gallery, 'places'));
+    }
+
+    public function test_the_counter_is_given_the_colour_picked_for_each_house(): void
+    {
+        $payload = $this->payload([]);
+        $row = ['size_group' => 'adults', 'size_label' => 'M', 'shirt_qty' => 5, 'shirt_price' => 200, 'pants_qty' => 0, 'pants_price' => 0];
+        $payload['specification']['screen_print_detail'] = json_encode([
+            'schema' => 'spec-v2',
+            'mode' => 'sports_day',
+            'sports_day_groups' => [
+                ['team_name' => 'คณะสีแดง', 'display_color' => '#dc2626', 'rows' => [$row]],
+                ['team_name' => 'คณะสีฟ้า', 'display_color' => 'red;}', 'rows' => [$row]],
+                ['team_name' => 'คณะสีเขียว', 'rows' => [$row]],
+            ],
+        ]);
+
+        $admin = $this->admin();
+        $this->actingAs($admin)->post('/orders', $payload)->assertSessionHasNoErrors();
+
+        $this->actingAs($admin)->get('/counter')
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('orders.0.details.sports_day_groups.0.display_color', '#DC2626')
+                // Not a colour: dropped, so the house keeps the colour read from its name.
+                ->where('orders.0.details.sports_day_groups.1.display_color', null)
+                ->where('orders.0.details.sports_day_groups.2.display_color', null));
+    }
 }

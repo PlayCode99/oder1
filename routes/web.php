@@ -2,7 +2,10 @@
 
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\GarmentPricingController;
+use App\Http\Controllers\OrderArtworkController;
 use App\Http\Controllers\OrderController;
+use App\Http\Controllers\OrderDeliveryNoteController;
+use App\Http\Controllers\OrderDueDateController;
 use App\Http\Controllers\OwnerDashboardController;
 use App\Http\Controllers\Production\CuttingTaskController;
 use App\Http\Controllers\Production\ProductionKanbanController;
@@ -39,6 +42,16 @@ Route::middleware(['auth'])->group(function () {
     Route::get('orders/{order}/edit', [OrderController::class, 'edit'])->name('orders.edit');
     Route::get('orders/{order}/duplicate', [OrderController::class, 'duplicate'])->name('orders.duplicate');
     Route::put('orders/{order}', [OrderController::class, 'update'])->name('orders.update');
+    Route::post('orders/{order}/due-date', [OrderDueDateController::class, 'update'])->name('orders.due-date.update');
+    // "อัปเดตรูป" on the counter: artwork alone, so a bill already on the floor
+    // can have its pictures brought up to date without its sizes or prices
+    // being reopened. Separate from orders.update for exactly that reason.
+    // The delivery note's own discount, which comes off what the bill came
+    // to and changes nothing about the bill itself.
+    Route::post('orders/{order}/delivery-discount', [OrderDeliveryNoteController::class, 'updateDiscount'])
+        ->name('orders.delivery-discount.update');
+    Route::get('orders/{order}/artwork', [OrderArtworkController::class, 'show'])->name('orders.artwork.show');
+    Route::post('orders/{order}/artwork', [OrderArtworkController::class, 'update'])->name('orders.artwork.update');
     Route::delete('orders/{order}', [OrderController::class, 'destroy'])->name('orders.destroy');
     Route::get('orders', [OrderController::class, 'index'])->name('orders.index');
     Route::post('orders', [OrderController::class, 'store'])->name('orders.store');
@@ -83,6 +96,14 @@ Route::middleware(['auth'])->group(function () {
     Route::delete('settings/data/heat-press-machines/{heatPressMachine}', [HeatPressMachineController::class, 'destroy'])->name('settings.data.heat-press-machines.destroy');
     Route::get('settings/data/production-capacity', [ProductionDailySettingController::class, 'index'])->name('settings.data.production-capacity.index');
     Route::put('settings/data/production-capacity', [ProductionDailySettingController::class, 'update'])->name('settings.data.production-capacity.update');
+    // The lengths a garment is cut to, which the shop maintains itself:
+    // "เซทใบงานเสื้อ" is this list, not a fixed three.
+    Route::post('settings/data/garments/styles', [GarmentPricingController::class, 'storeStyle'])
+        ->name('settings.data.garments.styles.store');
+    Route::put('settings/data/garments/styles/{garmentStyle}', [GarmentPricingController::class, 'updateStyle'])
+        ->name('settings.data.garments.styles.update');
+    Route::delete('settings/data/garments/styles/{garmentStyle}', [GarmentPricingController::class, 'destroyStyle'])
+        ->name('settings.data.garments.styles.destroy');
     Route::get('settings/data/garments/types', [GarmentPricingController::class, 'types'])
         ->name('settings.data.garments.types');
     Route::post('settings/data/garments/types', [GarmentPricingController::class, 'storeType'])

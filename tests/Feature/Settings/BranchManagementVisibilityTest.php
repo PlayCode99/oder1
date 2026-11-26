@@ -91,6 +91,54 @@ class BranchManagementVisibilityTest extends TestCase
         ]);
     }
 
+    public function test_a_branch_is_created_and_edited_with_its_header_colour(): void
+    {
+        $branch01 = $this->createBranch('01', 'หนองบัวลำภู');
+        $user = $this->createAdminSystemUser($branch01, AccessRole::Owner);
+
+        $this->actingAs($user)->post(route('settings.data.branches.store'), [
+            'branch_code' => '05', 'branch_name' => 'อุดร', 'header_color' => '#b91c1c',
+        ])->assertSessionHasNoErrors();
+
+        $branch = Branch::query()->where('branch_code', '05')->sole();
+        $this->assertSame('#B91C1C', $branch->header_color);
+
+        $this->actingAs($user)->put(route('settings.data.branches.update', $branch), [
+            'branch_code' => '05', 'branch_name' => 'อุดร', 'header_color' => '#166534',
+        ])->assertSessionHasNoErrors();
+
+        $this->assertSame('#166534', $branch->fresh()->header_color);
+
+        $this->actingAs($user)->get(route('settings.data.branches.index'))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('branches', fn ($branches): bool => collect($branches)
+                    ->firstWhere('branch_code', '05')['header_color'] === '#166534'));
+    }
+
+    public function test_a_header_colour_that_is_not_a_colour_is_refused(): void
+    {
+        $branch01 = $this->createBranch('01', 'หนองบัวลำภู');
+        $user = $this->createAdminSystemUser($branch01, AccessRole::Owner);
+
+        $this->actingAs($user)->post(route('settings.data.branches.store'), [
+            'branch_code' => '06', 'branch_name' => 'เลย', 'header_color' => 'red;}',
+        ])->assertSessionHasErrors('header_color');
+
+        $this->assertFalse(Branch::query()->where('branch_code', '06')->exists());
+    }
+
+    public function test_a_branch_saved_without_a_colour_keeps_the_default(): void
+    {
+        $branch01 = $this->createBranch('01', 'หนองบัวลำภู');
+        $user = $this->createAdminSystemUser($branch01, AccessRole::Owner);
+
+        $this->actingAs($user)->post(route('settings.data.branches.store'), [
+            'branch_code' => '07', 'branch_name' => 'ชัยภูมิ',
+        ])->assertSessionHasNoErrors();
+
+        $this->assertNull(Branch::query()->where('branch_code', '07')->sole()->header_color);
+    }
+
     private function createBranch(string $code, string $name): Branch
     {
         return Branch::query()->create([

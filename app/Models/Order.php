@@ -6,6 +6,7 @@ namespace App\Models;
 
 use App\Enums\OrderStatus;
 use App\Enums\SizeTier;
+use App\Support\Orders\GarmentStyles;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -70,6 +71,8 @@ class Order extends Model implements HasMedia
         'sports_day_artwork_urls',
         'pe_uniform_artwork_urls',
         'reference_designs',
+        'artwork_gallery',
+        'postponed_from',
     ];
 
     protected function casts(): array
@@ -82,6 +85,7 @@ class Order extends Model implements HasMedia
             'discount_percent' => 'float',
             'discount_amount' => 'float',
             'net_amount' => 'float',
+            'delivery_discount_percent' => 'float',
             'shipping_delivery_info' => 'array',
             'order_status' => OrderStatus::class,
         ];
@@ -139,6 +143,28 @@ class Order extends Model implements HasMedia
     }
 
     /**
+     * "คิดเงินเพิ่มเติม": money charged for something that is not a garment,
+     * in the order the counter typed it — which is the order the receipt
+     * prints it in.
+     *
+     * @return HasMany<OrderCharge, $this>
+     */
+    public function charges(): HasMany
+    {
+        return $this->hasMany(OrderCharge::class)->orderBy('position')->orderBy('id');
+    }
+
+    /**
+     * What the extra charges come to. Part of the bill's gross, so the
+     * discount is taken off the garments and these together — a bill is
+     * discounted as one figure, not garment by garment.
+     */
+    public function getChargesTotalAttribute(): float
+    {
+        return (float) $this->charges->sum(fn (OrderCharge $charge): float => (float) $charge->amount);
+    }
+
+    /**
      * @return HasMany<OrderStatusHistory, $this>
      */
     public function statusHistories(): HasMany
@@ -152,6 +178,40 @@ class Order extends Model implements HasMedia
     public function routings(): HasMany
     {
         return $this->hasMany(OrderRouting::class);
+    }
+
+    /**
+     * Every move of the delivery date, oldest first.
+     *
+     * @return HasMany<OrderDueDateChange, $this>
+     */
+    public function dueDateChanges(): HasMany
+    {
+        return $this->hasMany(OrderDueDateChange::class)->orderBy('id');
+    }
+
+    /**
+     * The latest move, which is what a sheet printed before it still shows.
+     *
+     * @return HasOne<OrderDueDateChange, $this>
+     */
+    public function latestDueDateChange(): HasOne
+    {
+        return $this->hasOne(OrderDueDateChange::class)->latestOfMany();
+    }
+
+    /**
+     * The date the bill was due before its latest move (Y-m-d), or null when
+     * it never moved. Read only when the move was loaded with the bill, so a
+     * page that does not show it pays no query for it.
+     */
+    public function getPostponedFromAttribute(): ?string
+    {
+        if (! $this->relationLoaded('latestDueDateChange')) {
+            return null;
+        }
+
+        return $this->latestDueDateChange?->from_date?->format('Y-m-d');
     }
 
     /**
@@ -281,6 +341,71 @@ class Order extends Model implements HasMedia
     }
 
     /**
+     * Every picture on the bill, once each, with the sheets it belongs to.
+     *
+     * The same file attached to two tables is stored twice — each sheet needs
+     * its own — but it is one picture, so the overview shows it once and says
+     * whose it is. Files are told apart by name and size, which two different
+     * pictures practically never share.
+     *
+     * `places` names each sheet the picture is on: a batch key such as
+     * 'shirt_kids_short' or 'sports_day_0_shirt_kids', 'sports_day_0' for a
+     * colour house, 'pe_kids' for an old ชุดพละ table, or 'shirt' / 'pants' /
+     * 'all' for a picture meant for every sheet of its garment or the bill.
+     *
+     * @return list<array{url: string, places: list<string>}>
+     */
+    public function getArtworkGalleryAttribute(): array
+    {
+        $gallery = [];
+
+        foreach (self::artworkCollections() as $collection) {
+            foreach ($this->getMedia($collection) as $media) {
+                $place = self::artworkPlaceOf($media, $collection);
+                $fingerprint = $media->name.'|'.$media->size;
+
+                if (! isset($gallery[$fingerprint])) {
+                    $gallery[$fingerprint] = ['url' => $media->getUrl(), 'places' => []];
+                }
+
+                if (! in_array($place, $gallery[$fingerprint]['places'], true)) {
+                    $gallery[$fingerprint]['places'][] = $place;
+                }
+            }
+        }
+
+        return array_values($gallery);
+    }
+
+    /**
+     * The sheet one stored picture belongs to, as a place key.
+     *
+     * 'shirt' / 'pants' mean every sheet of that garment, a batch key such as
+     * 'shirt_kids_short' means that one sheet, 'sports_day_0' a colour house,
+     * 'pe_kids' an old ชุดพละ table, and 'all' the whole bill.
+     *
+     * Read by the gallery on the receipt and by "อัปเดตรูป" on the counter, so
+     * a picture is shown in the same place wherever it is listed.
+     */
+    public static function artworkPlaceOf(Media $media, string $collection): string
+    {
+        return match ($collection) {
+            'sports_day_artwork' => is_numeric($media->getCustomProperty('sports_day_group'))
+                ? 'sports_day_'.(int) $media->getCustomProperty('sports_day_group')
+                : 'all',
+            'pe_uniform_artwork' => 'pe_'.(string) $media->getCustomProperty('pe_table'),
+            'shirt_artwork', 'pants_artwork' => (function () use ($media, $collection): string {
+                $batch = $media->getCustomProperty(self::ARTWORK_BATCH_PROPERTY);
+
+                return is_string($batch) && trim($batch) !== ''
+                    ? $batch
+                    : ($collection === 'pants_artwork' ? 'pants' : 'shirt');
+            })(),
+            default => 'all',
+        };
+    }
+
+    /**
      * The artwork collections a user may attach to and remove from. Anything
      * outside this list is off limits to the edit form's delete path.
      *
@@ -322,7 +447,7 @@ class Order extends Model implements HasMedia
         // artwork has to be pinnable to. Trousers have no such cut.
         $styles = $garment === 'pants'
             ? ['short', 'long', 'unspecified']
-            : ['short', 'long', 'sleeveless', 'unspecified'];
+            : [...GarmentStyles::codes('SHIRT'), 'unspecified'];
 
         // One key per tier, not per pricing group: ประถม - มัธยมต้น is sewn to
         // its own pattern and so prints its own sheet, which artwork has to be
@@ -345,11 +470,11 @@ class Order extends Model implements HasMedia
     /**
      * A colour house's sheet, which กีฬาสี bills are split into. The house is
      * its position on the bill, and there is no sleeve length: one sheet per
-     * house, garment and size group, exactly as the board groups them. The
+     * house, garment and size range, exactly as the board groups them. The
      * index is bounded so the key space stays finite — no bill has a hundred
      * colour houses.
      */
-    private const SPORTS_DAY_BATCH_PATTERN = '/^sports_day_\d{1,2}_(shirt|pants)_(kids|adults)$/';
+    private const SPORTS_DAY_BATCH_PATTERN = '/^sports_day_\d{1,2}_(shirt|pants)_(kids|junior|adults)$/';
 
     /**
      * The batch an image may be pinned to, or null for "every sheet of this

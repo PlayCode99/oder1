@@ -91,6 +91,8 @@ export interface Branch {
     branch_name: string;
     phone: string | null;
     address: string | null;
+    /** The colour this branch's sheets are headed in; null is the default. */
+    header_color?: string | null;
     created_at: DateTimeString;
     updated_at: DateTimeString;
 
@@ -164,6 +166,13 @@ export interface Order {
     delivery_method: string | null;
     shipping_address: string | null;
     reference_designs?: string[];
+    /**
+     * Every picture on the bill once, with the sheets it is on (see
+     * Order::getArtworkGalleryAttribute).
+     */
+    artwork_gallery?: { url: string; places: string[] }[];
+    /** The date it was due before its latest postponement, when it moved. */
+    postponed_from?: string | null;
     created_at: DateTimeString;
     updated_at: DateTimeString;
     deleted_at: DateTimeString | null;
@@ -211,12 +220,17 @@ export interface OrderItem {
     size_label: string;
     /**
      * Sleeve and leg length, null on rows saved before the columns existed.
-     * A shirt can be cut sleeveless and a pair of trousers cannot, so the two
-     * do not take the same set of answers — writing them the same would let a
-     * check for แขนกุด narrow to never and pass silently.
+     *
+     * A code out of `garment_styles`, not a fixed set: the shop keeps its own
+     * list of lengths and may add one (a three-quarter sleeve) at any time, so
+     * a row can honestly carry a code this file has never heard of. Read it
+     * through `readShirtStyle`/`readPantsStyle` rather than comparing against
+     * spelled-out codes, which silently rewrites a length the shop added.
+     *
+     * A shirt's lengths and a pair of trousers' are still separate lists.
      */
-    shirt_style?: 'short' | 'long' | 'sleeveless' | null;
-    pants_style?: 'short' | 'long' | null;
+    shirt_style?: string | null;
+    pants_style?: string | null;
     quantity: number;
     unit_price: number;
     total_price: number;

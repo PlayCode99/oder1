@@ -67,13 +67,60 @@ describe('the colour house grid on the counter sheet', () => {
         expect(matrix.rows.map((row) => row.sizeLabel)).toEqual(['M']);
     });
 
-    it('shows a range when the houses are not all on the same price', () => {
+    it('shows the dearer price when a house pays a surcharge on a size', () => {
+        // The counter bumps the price of a large size by hand; that price is
+        // the size's price, not a range of two.
         const [matrix] = buildSportsDayMatrices([
-            house('ชมพู', { M: 10 }, 250),
-            house('แดง', { M: 10 }, 270),
+            house('ฟ้า', { JS: 100 }, 169, 'kids'),
+            house('แดง', { JS: 100 }, 159, 'kids'),
         ]);
 
-        expect(matrix.rows[0].price).toBe('250.00-270.00');
+        expect(matrix.rows[0].price).toBe('169.00');
+        // What each house is charged is still what the row adds up to.
+        expect(matrix.rows[0].amount).toBe(32800);
+        expect(matrix.grandAmount).toBe(32800);
+    });
+
+    it('gives ประถม - มัธยมต้น a grid of its own, between kids and adults', () => {
+        const matrices = buildSportsDayMatrices([
+            {
+                team_name: 'คณะสีเขียว',
+                color_name: 'เขียว',
+                rows: [
+                    {
+                        size_group: 'adults',
+                        size_label: 'L',
+                        shirt_qty: 6,
+                        shirt_price: 250,
+                        pants_qty: 0,
+                        pants_price: 0,
+                    },
+                    {
+                        size_group: 'junior',
+                        size_label: 'JL',
+                        shirt_qty: 8,
+                        shirt_price: 200,
+                        pants_qty: 0,
+                        pants_price: 0,
+                    },
+                    {
+                        size_group: 'kids',
+                        size_label: 'JM',
+                        shirt_qty: 4,
+                        shirt_price: 150,
+                        pants_qty: 0,
+                        pants_price: 0,
+                    },
+                ],
+            },
+        ]);
+
+        expect(matrices.map((matrix) => matrix.title)).toEqual([
+            'ขนาดเด็ก · เสื้อ',
+            'ขนาดประถม - มัธยมต้น · เสื้อ',
+            'ขนาดผู้ใหญ่ · เสื้อ',
+        ]);
+        expect(matrices[1].grandTotal).toBe(8);
     });
 
     it('splits kids from adults and shirts from pants', () => {
@@ -146,5 +193,31 @@ describe('the colour house grid on the counter sheet', () => {
         expect(matrix.rows[0].amount).toBe(2500 + 2700);
         expect(matrix.houseAmounts).toEqual([2500, 2700]);
         expect(matrix.grandAmount).toBe(5200);
+    });
+});
+
+describe('the colour a house is painted in', () => {
+    it('is the colour picked for it on the form', () => {
+        const [matrix] = buildSportsDayMatrices([
+            // Named red, painted yellow: the pick wins over the name.
+            { ...house('แดง', { M: 5 }), display_color: '#FACC15' },
+        ]);
+
+        expect(matrix.houses[0]).toMatchObject({
+            background: '#FACC15',
+            text: '#0F172A',
+        });
+    });
+
+    it('is read from the house’s name when none was picked', () => {
+        const [matrix] = buildSportsDayMatrices([
+            { ...house('แดง', { M: 5 }), display_color: null },
+            house('ฟ้า', { M: 5 }),
+        ]);
+
+        expect(matrix.houses.map((item) => item.background)).toEqual([
+            resolveSportsDaySwatch('แดง').background,
+            resolveSportsDaySwatch('ฟ้า').background,
+        ]);
     });
 });

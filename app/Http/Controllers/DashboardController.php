@@ -9,10 +9,14 @@ use App\Enums\RoutingStationName;
 use App\Enums\RoutingStatus;
 use App\Models\Branch;
 use App\Models\CatalogItem;
+use App\Models\GarmentType;
 use App\Models\Order;
+use App\Models\OrderDueDateChange;
 use App\Models\OrderRouting;
 use App\Models\TeamInvitation;
 use App\Support\Orders\DeliveryCalendarBuilder;
+use App\Support\Orders\DeliveryDateLoads;
+use App\Support\Orders\GarmentStyles;
 use App\Support\Orders\OrderCompletion;
 use App\Support\UserAccessControl;
 use Carbon\CarbonImmutable;
@@ -65,6 +69,7 @@ class DashboardController extends Controller
         $keys = [
             'jssport.shirt-patterns',
             'jssport.shirt-fabrics',
+            'jssport.shirt-neck-styles',
             'jssport.shirt-collars',
             'jssport.shirt-colors',
             'jssport.shirt-fabric-colors',
@@ -115,7 +120,7 @@ class DashboardController extends Controller
                 ? ['jssport.pants-patterns', 'jssport.shirt-patterns']
                 : ['jssport.shirt-patterns', 'jssport.pants-patterns'],
             'fabric_id' => ['jssport.shirt-fabrics'],
-            'neck_style_id' => ['jssport.shirt-collars'],
+            'neck_style_id' => ['jssport.shirt-neck-styles', 'jssport.shirt-collars'],
             'collar_color' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors'],
             'leg_style' => ['jssport.pants-leg-style'],
             'leg_hem' => ['jssport.pants-leg-hem'],
@@ -229,7 +234,7 @@ class DashboardController extends Controller
             ['key' => 'pattern_id', 'label' => 'แพทเทิร์น', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-patterns']],
             ['key' => 'fabric_id', 'label' => 'เนื้อผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabrics']],
             ['key' => 'fabric_color_id', 'label' => 'สีผ้า', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-fabric-colors', 'jssport.shirt-colors']],
-            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
+            ['key' => 'neck_style_id', 'label' => 'แบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-styles', 'jssport.shirt-collars']],
             ['key' => 'neck_color_id', 'label' => 'สีแบบคอ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-neck-colors', 'jssport.shirt-colors']],
             ['key' => 'collar_id', 'label' => 'ปก', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-collars']],
             ['key' => 'placket_style_id', 'label' => 'แบบสาบ', 'type' => 'catalog', 'storage_keys' => ['jssport.shirt-plackets']],
@@ -244,7 +249,7 @@ class DashboardController extends Controller
             ['key' => 'stripe_style_text', 'label' => 'แบบลา', 'type' => 'text'],
             ['key' => 'screen_text', 'label' => 'ข้อความสกรีน', 'type' => 'text'],
             ['key' => 'embroidery_code_text', 'label' => 'รหัสงานปัก', 'type' => 'text'],
-            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดปัก', 'type' => 'text'],
+            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดเพิ่มเติม', 'type' => 'text'],
         ];
     }
 
@@ -267,8 +272,46 @@ class DashboardController extends Controller
             ['key' => 'stripe_style_text', 'label' => 'แบบลา', 'type' => 'text'],
             ['key' => 'screen_text', 'label' => 'ข้อความสกรีน', 'type' => 'text'],
             ['key' => 'embroidery_code_text', 'label' => 'รหัสงานปัก', 'type' => 'text'],
-            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดปัก', 'type' => 'text'],
+            ['key' => 'embroidery_note_text', 'label' => 'รายละเอียดเพิ่มเติม', 'type' => 'text'],
         ];
+    }
+
+    /** @var array<int, string>|null Garment type names by id, read once per request. */
+    private ?array $garmentTypeNames = null;
+
+    /**
+     * A spec's garment type leads its rows, as it leads the form: it is what
+     * tells a long-sleeved sheet from a short one, and what its labour is
+     * costed from, so the receipt names it. A spec with no type, one whose
+     * type is gone, or one with nothing else filled in, is left as it was.
+     *
+     * @param  array<int, array{label: string, value: string}>  $rows
+     * @param  array<string, mixed>  $specs
+     * @return array<int, array{label: string, value: string}>
+     */
+    private function withGarmentTypeRow(array $rows, array $specs, bool $isPants): array
+    {
+        // A spec nobody filled in still carries the form's default type, so a
+        // type alone says nothing was ordered: a shirts-only bill must not grow
+        // a trousers block just because the empty trousers spec has a type.
+        if ($rows === []) {
+            return $rows;
+        }
+
+        $typeId = (int) ($specs[$isPants ? 'pants_type_id' : 'shirt_type_id'] ?? 0);
+
+        if ($typeId <= 0) {
+            return $rows;
+        }
+
+        $this->garmentTypeNames ??= GarmentType::query()->pluck('name', 'id')->all();
+        $name = trim((string) ($this->garmentTypeNames[$typeId] ?? ''));
+
+        if ($name === '') {
+            return $rows;
+        }
+
+        return [['label' => $isPants ? 'แบบกางเกง' : 'แบบเสื้อ', 'value' => $name], ...$rows];
     }
 
     /**
@@ -285,9 +328,17 @@ class DashboardController extends Controller
         $shirtLabels = is_array($savedLabels['shirt'] ?? null) ? $savedLabels['shirt'] : [];
         $pantsLabels = is_array($savedLabels['pants'] ?? null) ? $savedLabels['pants'] : [];
 
-        $shirtRows = $this->buildSpecificationRows($shirtSpecs, self::shirtSpecDefinitions(), $shirtLabels);
+        $shirtRows = $this->withGarmentTypeRow(
+            $this->buildSpecificationRows($shirtSpecs, self::shirtSpecDefinitions(), $shirtLabels),
+            $shirtSpecs,
+            false,
+        );
 
-        $pantsRows = $this->buildSpecificationRows($pantsSpecs, self::pantsSpecDefinitions(), $pantsLabels);
+        $pantsRows = $this->withGarmentTypeRow(
+            $this->buildSpecificationRows($pantsSpecs, self::pantsSpecDefinitions(), $pantsLabels),
+            $pantsSpecs,
+            true,
+        );
 
         // A spec per sheet, when the bill names them. Counter and production
         // read the same keys, so a spec shown here is the one that sheet is
@@ -303,10 +354,14 @@ class DashboardController extends Controller
 
             $isPants = str_starts_with($key, 'pants_');
 
-            $batches[$key] = $this->buildSpecificationRows(
+            $batches[$key] = $this->withGarmentTypeRow(
+                $this->buildSpecificationRows(
+                    $specs,
+                    $isPants ? self::pantsSpecDefinitions() : self::shirtSpecDefinitions(),
+                    is_array($perBatchLabels[$key] ?? null) ? $perBatchLabels[$key] : [],
+                ),
                 $specs,
-                $isPants ? self::pantsSpecDefinitions() : self::shirtSpecDefinitions(),
-                is_array($perBatchLabels[$key] ?? null) ? $perBatchLabels[$key] : [],
+                $isPants,
             );
         }
 
@@ -324,7 +379,10 @@ class DashboardController extends Controller
     /** Sleeve or leg length as saved on a person row, '' when the bill has none. */
     private function personalizationStyle(mixed $style): string
     {
-        return in_array($style, ['short', 'long', 'sleeveless'], true) ? (string) $style : '';
+        return in_array($style, GarmentStyles::codes('SHIRT'), true)
+            || in_array($style, GarmentStyles::codes('PANTS'), true)
+            ? (string) $style
+            : '';
     }
 
     private function mapPersonalizationRows(array $specification): array
@@ -368,6 +426,9 @@ class DashboardController extends Controller
                     'number' => $number !== '' ? $number : '-',
                     'pants_size' => $pantsSize,
                     'pants_number' => $pantsNumber,
+                    // How many trousers this person ordered, so the roster can
+                    // tell who has trousers from who merely has a size typed.
+                    'pants_quantity' => max(0, (int) ($row['pants_quantity'] ?? 0)),
                     // Bills written before lengths existed carry none, and stay
                     // that way: the sheets read '' as "this bill never said" and
                     // print exactly as they always did.
@@ -427,7 +488,9 @@ class DashboardController extends Controller
                         }
 
                         return [
-                            'size_group' => ($row['size_group'] ?? '') === 'kids' ? 'kids' : 'adults',
+                            // ประถม - มัธยมต้น is a range of its own; rows saved
+                            // before it existed say kids or adults.
+                            'size_group' => in_array($row['size_group'] ?? '', ['kids', 'junior'], true) ? $row['size_group'] : 'adults',
                             'size_label' => trim((string) ($row['size_label'] ?? '')),
                             'shirt_qty' => $shirtQty,
                             'shirt_price' => max(0.0, (float) ($row['shirt_price'] ?? 0)),
@@ -450,6 +513,12 @@ class DashboardController extends Controller
                     // The stored value is a catalog id when the colour came from
                     // the dropdown, and free text when the counter typed one.
                     'color_name' => $colors[$colorId] ?? ($colorId !== '' ? $colorId : ''),
+                    // The colour the house's tables are painted in, picked on the
+                    // form. Absent on older bills, which keep the colour read
+                    // from the house's name.
+                    'display_color' => preg_match('/^#[0-9A-Fa-f]{6}$/', (string) ($group['display_color'] ?? '')) === 1
+                        ? strtoupper((string) $group['display_color'])
+                        : null,
                     'rows' => $rows,
                 ];
             })
@@ -996,7 +1065,7 @@ class DashboardController extends Controller
         $ordersPaginator = (clone $ordersQuery)
             ->with([
                 'customer:id,customer_name,phone,line_fb',
-                'branch:id,branch_name',
+                'branch:id,branch_name,phone,header_color',
                 'creatorUser:id,name',
                 'receipts',
                 'routings.assignedUser:id,name',
@@ -1006,12 +1075,15 @@ class DashboardController extends Controller
                 'routings.screenTeam:id,team_name',
                 'routings.heatPressMachine:id,machine_name',
                 'items',
+                'charges',
                 'specification',
+                'latestDueDateChange',
+                'dueDateChanges.changedBy:id,name',
             ])
             ->paginate(self::COUNTER_ORDERS_PER_PAGE)
             ->withQueryString();
 
-        $orders = collect($ordersPaginator->items())->map(function (Order $order): array {
+        $orders = collect($ordersPaginator->items())->map(function (Order $order) use ($actor): array {
             $totalPaid = (float) $order->receipts->sum('amount_paid');
             $paymentStatus = $totalPaid >= (float) $order->net_amount
                 ? 'paid'
@@ -1059,6 +1131,24 @@ class DashboardController extends Controller
                     'billing_date' => $order->order_date?->format('Y-m-d H:i:s'),
                     'due_date' => $order->due_date?->format('Y-m-d H:i:s'),
                     'branch_name' => $order->branch?->branch_name,
+                    // "เลื่อนส่ง": whether this user may move the date, the date
+                    // it moved from last, and every move for the timeline.
+                    'can_reschedule' => $actor->can('reschedule', $order),
+                    // "อัปเดตรูป": wider than editing on purpose — pictures keep
+                    // changing after the floor has started, and a finished job
+                    // often gets a photograph of what actually shipped.
+                    'can_update_artwork' => $actor->can('updateArtwork', $order),
+                    // "ใบจัดส่ง": who may move the figure the customer signs for.
+                    'can_discount_delivery_note' => $actor->can('discountDeliveryNote', $order),
+                    'postponed_from' => $order->postponed_from,
+                    'due_date_changes' => $order->dueDateChanges
+                        ->map(fn (OrderDueDateChange $change): array => $change->toDisplay())
+                        ->values()
+                        ->all(),
+                    // The branch's own number and colour head the receipt; the
+                    // customer's number belongs with the customer, below.
+                    'branch_phone' => $order->branch?->phone,
+                    'branch_header_color' => $order->branch?->header_color,
                     'delivery_method' => $order->delivery_method,
                     'shipping_address' => $order->shipping_address,
                     'shipping_delivery_info' => $order->shipping_delivery_info,
@@ -1068,10 +1158,23 @@ class DashboardController extends Controller
                         'line_fb' => $order->customer?->line_fb,
                     ],
                     'pricing' => [
+                        // Gross includes "คิดเงินเพิ่มเติม": the discount is
+                        // taken off the garments and those together.
                         'total_amount' => (float) $order->total_amount,
+                        'charges' => $order->charges
+                            ->map(fn ($charge): array => [
+                                'label' => (string) $charge->label,
+                                'amount' => (float) $charge->amount,
+                            ])
+                            ->values()
+                            ->all(),
                         'discount_percent' => (float) $order->discount_percent,
                         'discount_amount' => (float) $order->discount_amount,
                         'net_amount' => (float) $order->net_amount,
+                        // The delivery note's own reduction, off the net
+                        // above. Deliberately not folded into it: the bill
+                        // and the books keep the figure they were written with.
+                        'delivery_discount_percent' => (float) $order->delivery_discount_percent,
                         'paid_amount' => $totalPaid,
                     ],
                     'specification' => $specification,
@@ -1144,6 +1247,9 @@ class DashboardController extends Controller
                         ->values()
                         ->all(),
                     'reference_designs' => $order->reference_designs,
+                    // Every picture once, with the sheets it is on, so the
+                    // counter shows a file attached to two tables only once.
+                    'artwork_gallery' => $order->artwork_gallery,
                 ],
             ];
         });
@@ -1192,6 +1298,9 @@ class DashboardController extends Controller
                 $actor,
             ),
             'deliveryDueToday' => DeliveryCalendarBuilder::dueTodayCount($actor),
+            // The postpone dialog's date picker, counted as the order form counts.
+            'deliveryDateLoads' => DeliveryDateLoads::from(),
+            'dailyProductionCapacity' => DeliveryDateLoads::dailyCapacity(),
             // Set by the redirect after saving an order, so the counter can offer
             // to print the work sheet straight away.
             'savedOrderCode' => $request->session()->get('order_code'),

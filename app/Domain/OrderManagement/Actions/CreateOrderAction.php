@@ -14,6 +14,11 @@ use App\Models\Branch;
 use App\Models\Customer;
 use App\Models\Order;
 use App\Models\Receipt;
+use App\Models\User;
+use App\Support\Orders\ArtworkMediaStore;
+use App\Support\Orders\GarmentStyles;
+use App\Support\Orders\OrderCharges;
+use App\Support\Orders\TypedSpecMasterData;
 use App\Support\Production\ProductionRateSnapshotBuilder;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
@@ -25,6 +30,8 @@ use Throwable;
 
 class CreateOrderAction
 {
+    public function __construct(private readonly ArtworkMediaStore $artworkStore = new ArtworkMediaStore) {}
+
     /**
      * @param  array<string, mixed>  $data
      */
@@ -32,6 +39,15 @@ class CreateOrderAction
     {
         try {
             return DB::transaction(function () use ($data, $creatorUserId): Order {
+                // A spec name typed rather than picked is filed as master data
+                // here, inside the bill's own transaction, so a bill that fails
+                // to save files nothing.
+                if (is_array($data['specification'] ?? null)) {
+                    $data['specification'] = (new TypedSpecMasterData(
+                        User::query()->whereKey($creatorUserId)->value('name'),
+                    ))->apply($data['specification']);
+                }
+
                 $this->logCreateStage('start', $creatorUserId, $data, [
                     'has_specification' => is_array($data['specification'] ?? null),
                     'design_artwork' => ($data['design_artwork'] ?? null) instanceof UploadedFile,
@@ -78,9 +94,15 @@ class CreateOrderAction
                     ))),
                 ]);
 
+                // "คิดเงินเพิ่มเติม" is part of what the bill is worth, so
+                // it joins the garments BEFORE the discount: the shop
+                // discounts a bill as one figure, not garment by garment.
+                $charges = OrderCharges::normalize($data['charges'] ?? []);
+                $grossAmount = $subTotalAmount + OrderCharges::total($charges);
+
                 $discountPercent = (float) ($data['discount_percent'] ?? 0);
-                $discountAmount = ($subTotalAmount * $discountPercent) / 100;
-                $netAmount = max(0, $subTotalAmount - $discountAmount);
+                $discountAmount = ($grossAmount * $discountPercent) / 100;
+                $netAmount = max(0, $grossAmount - $discountAmount);
 
                 $customerId = $this->resolveCustomerId($data);
                 $openedAt = now('Asia/Bangkok');
@@ -96,7 +118,7 @@ class CreateOrderAction
                     'shipping_address' => isset($data['shipping_address']) ? (string) $data['shipping_address'] : null,
                     'order_date' => $openedAt,
                     'due_date' => (string) $data['due_date'],
-                    'total_amount' => $subTotalAmount,
+                    'total_amount' => $grossAmount,
                     'discount_percent' => $discountPercent,
                     'discount_amount' => $discountAmount,
                     'net_amount' => $netAmount,
@@ -134,15 +156,15 @@ class CreateOrderAction
                 }
 
                 if (($data['design_artwork'] ?? null) instanceof UploadedFile) {
-                    $order->addMedia($data['design_artwork'])->toMediaCollection('artwork');
+                    $this->artworkStore->store($order, $data['design_artwork'], 'artwork');
                 }
 
                 foreach (Arr::wrap($data['shirt_artwork'] ?? []) as $shirtArtworkFile) {
-                    $this->storeArtworkAsWebpIfPresent($order, $shirtArtworkFile, 'shirt_artwork');
+                    $this->storeArtwork($order, $shirtArtworkFile, 'shirt_artwork');
                 }
 
                 foreach (Arr::wrap($data['pants_artwork'] ?? []) as $pantsArtworkFile) {
-                    $this->storeArtworkAsWebpIfPresent($order, $pantsArtworkFile, 'pants_artwork');
+                    $this->storeArtwork($order, $pantsArtworkFile, 'pants_artwork');
                 }
 
                 // Artwork drawn for one production batch only. The batch is
@@ -152,16 +174,18 @@ class CreateOrderAction
                     foreach (Arr::wrap($data[$collection.'_scoped'] ?? []) as $batch => $batchFiles) {
                         $normalizedBatch = Order::normalizeArtworkBatch($batch, $collection);
 
+                        $properties = $normalizedBatch === null
+                            ? []
+                            : [Order::ARTWORK_BATCH_PROPERTY => $normalizedBatch];
+
                         foreach (Arr::wrap($batchFiles) as $batchFile) {
-                            $this->storeArtworkAsWebpIfPresent($order, $batchFile, $collection, $normalizedBatch);
+                            $this->storeArtwork($order, $batchFile, $collection, $properties);
                         }
                     }
                 }
 
                 foreach (Arr::wrap($data['reference_designs'] ?? []) as $referenceDesign) {
-                    if ($referenceDesign instanceof UploadedFile) {
-                        $order->addMedia($referenceDesign)->toMediaCollection('reference_designs');
-                    }
+                    $this->storeArtwork($order, $referenceDesign, 'reference_designs');
                 }
 
                 // Form 3 (กีฬาสี): files arrive keyed by colour house index. The
@@ -173,13 +197,12 @@ class CreateOrderAction
                     }
 
                     foreach (Arr::wrap($groupFiles) as $groupFile) {
-                        if (! $groupFile instanceof UploadedFile) {
-                            continue;
-                        }
-
-                        $order->addMedia($groupFile)
-                            ->withCustomProperties(['sports_day_group' => (int) $groupIndex])
-                            ->toMediaCollection('sports_day_artwork');
+                        $this->storeArtwork(
+                            $order,
+                            $groupFile,
+                            'sports_day_artwork',
+                            ['sports_day_group' => (int) $groupIndex],
+                        );
                     }
                 }
 
@@ -191,15 +214,16 @@ class CreateOrderAction
                     }
 
                     foreach (Arr::wrap($tableFiles) as $tableFile) {
-                        if (! $tableFile instanceof UploadedFile) {
-                            continue;
-                        }
-
-                        $order->addMedia($tableFile)
-                            ->withCustomProperties(['pe_table' => $tableType])
-                            ->toMediaCollection('pe_uniform_artwork');
+                        $this->storeArtwork(
+                            $order,
+                            $tableFile,
+                            'pe_uniform_artwork',
+                            ['pe_table' => $tableType],
+                        );
                     }
                 }
+
+                OrderCharges::replace($order, $charges);
 
                 // "เปิดบิลอีกครั้ง": the browser can only re-send files the user
                 // picked just now, so the source order's already-saved artwork is
@@ -209,6 +233,7 @@ class CreateOrderAction
                     $data['duplicate_from_id'] ?? null,
                     $data['removed_media_ids'] ?? [],
                     $data['artwork_scopes'] ?? [],
+                    $data['sports_day_artwork_houses'] ?? [],
                 );
 
                 // Lock in what the shop pays for this work today. Editing the
@@ -289,9 +314,12 @@ class CreateOrderAction
      * keeps its own images intact -- including images the user removed from the
      * duplicate, which are skipped here rather than deleted from the source.
      */
-    private function copyArtworkFromSourceOrder(Order $order, mixed $sourceOrderId, mixed $removedMediaIds = [], mixed $artworkScopes = []): void
+    private function copyArtworkFromSourceOrder(Order $order, mixed $sourceOrderId, mixed $removedMediaIds = [], mixed $artworkScopes = [], mixed $sportsDayHouses = []): void
     {
         $scopes = $this->artworkScopes($artworkScopes);
+        // Form 3: a house's pictures follow the house to the position it holds
+        // on the new bill, keyed — like the scopes — by the source image's id.
+        $houses = $this->artworkScopes($sportsDayHouses);
 
         if (! is_numeric($sourceOrderId)) {
             return;
@@ -321,6 +349,11 @@ class CreateOrderAction
                 // the bill being copied from untouched.
                 if (array_key_exists((int) $media->id, $scopes) && in_array($collection, Order::batchedArtworkCollections(), true)) {
                     $this->pinArtworkBatch($copy, Order::normalizeArtworkBatch($scopes[(int) $media->id], $collection));
+                }
+
+                if ($collection === 'sports_day_artwork' && is_numeric($houses[(int) $media->id] ?? null)) {
+                    $copy->setCustomProperty('sports_day_group', (int) $houses[(int) $media->id]);
+                    $copy->save();
                 }
             }
         }
@@ -362,90 +395,32 @@ class CreateOrderAction
         return $normalized;
     }
 
-    private function storeArtworkAsWebpIfPresent(Order $order, mixed $file, string $collection, ?string $batch = null): void
+    /**
+     * Stores one artwork file, skipping anything that is not an upload: the
+     * form sends a mix of new files and placeholders for saved ones.
+     *
+     * @param  array<string, mixed>  $properties
+     */
+    private function storeArtwork(Order $order, mixed $file, string $collection, array $properties = []): void
     {
         if (! $file instanceof UploadedFile) {
             return;
         }
 
-        $properties = $batch === null ? [] : [Order::ARTWORK_BATCH_PROPERTY => $batch];
-        $webpBinary = $this->convertUploadedImageToWebpBinary($file);
-
-        if ($webpBinary === null) {
-            if (strtolower((string) $file->getClientOriginalExtension()) === 'webp') {
-                $order->addMedia($file)
-                    ->withCustomProperties($properties)
-                    ->toMediaCollection($collection);
-
-                return;
-            }
-
-            throw new RuntimeException(sprintf('Unable to convert %s to webp before persistence.', $collection));
-        }
-
-        $baseName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
-        $safeBaseName = trim((string) $baseName) !== '' ? (string) $baseName : 'artwork';
-
-        $order->addMediaFromString($webpBinary)
-            ->usingFileName($safeBaseName.'.webp')
-            ->usingName($safeBaseName)
-            ->withCustomProperties($properties)
-            ->toMediaCollection($collection);
-    }
-
-    private function convertUploadedImageToWebpBinary(UploadedFile $file): ?string
-    {
-        $mimeType = strtolower((string) $file->getMimeType());
-
-        if (! str_starts_with($mimeType, 'image/')) {
-            return null;
-        }
-
-        if (! function_exists('imagecreatefromstring') || ! function_exists('imagewebp')) {
-            return null;
-        }
-
-        $contents = @file_get_contents($file->getRealPath());
-
-        if ($contents === false) {
-            return null;
-        }
-
-        $image = @imagecreatefromstring($contents);
-
-        if ($image === false) {
-            return null;
-        }
-
-        ob_start();
-        $written = @imagewebp($image, null, 82);
-        $binary = ob_get_clean();
-        imagedestroy($image);
-
-        if ($written !== true || ! is_string($binary) || $binary === '') {
-            return null;
-        }
-
-        return $binary;
+        $this->artworkStore->store($order, $file, $collection, $properties);
     }
 
     /**
-     * @param  array<string, mixed>  $data
-     * @param  array<string, mixed>  $context
-     */
-    /**
-     * A shirt takes short, long or sleeveless; trousers take the first two.
-     * Anything else means the row was
-     * recorded without a stated style and is stored as null.
-     */
-    /**
-     * A length the floor can actually cut. Sleeveless belongs to shirts alone,
-     * and a row that names anything else keeps no length at all rather than
-     * being guessed into one — the sheet says so instead.
+     * A length the floor can actually cut, read off the shop's own list.
+     *
+     * A shirt's lengths and a pair of trousers' are separate lists — แขนกุด
+     * belongs to shirts alone — and a row that names a length the shop does
+     * not keep stores none at all rather than being guessed into one. The
+     * sheet then says so instead of naming a cut nobody can make.
      */
     private function garmentStyle(mixed $value, string $garment = 'shirt'): ?string
     {
-        $allowed = $garment === 'pants' ? ['short', 'long'] : ['short', 'long', 'sleeveless'];
+        $allowed = GarmentStyles::codes($garment === 'pants' ? 'PANTS' : 'SHIRT');
 
         return in_array($value, $allowed, true) ? (string) $value : null;
     }

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+    cleanup,
+    fireEvent,
+    render,
+    screen,
+    waitFor,
+} from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import Counter from '@/pages/Counter';
@@ -330,6 +336,66 @@ describe('counter work-sheet PDF', () => {
         expect(html).toContain('1,000');
     });
 
+    /**
+     * "คิดเงินเพิ่มเติม" is money the customer is asked to pay, so the
+     * receipt has to say what it was for. One line each, named — a bill whose
+     * total is 1,700 larger than its garments with nothing to explain it is a
+     * bill the counter has to defend from memory.
+     */
+    it('names every extra charge on the sheet', () => {
+        const html = printedHtml(
+            makeRow({
+                details: {
+                    pricing: {
+                        total_amount: 4700,
+                        charges: [
+                            { label: 'ค่าจัดส่ง EMS', amount: 500 },
+                            { label: 'ค่าทำด่วน', amount: 1200 },
+                        ],
+                        discount_percent: 10,
+                        discount_amount: 470,
+                        net_amount: 4230,
+                        paid_amount: 1000,
+                    },
+                },
+            }) as never,
+        );
+
+        expect(html).toContain('ค่าจัดส่ง EMS');
+        expect(html).toContain('ค่าทำด่วน');
+        expect(html).toContain('1,200');
+    });
+
+    it('prints nothing extra on a bill that charges only for garments', () => {
+        expect(printedHtml()).not.toContain('ค่าจัดส่ง');
+    });
+
+    /**
+     * The label is whatever the counter typed, and it goes into a string of
+     * HTML. Escaped like every other piece of customer text on the sheet.
+     */
+    it('escapes a charge label instead of letting it break the markup', () => {
+        const html = printedHtml(
+            makeRow({
+                details: {
+                    pricing: {
+                        total_amount: 3500,
+                        charges: [
+                            { label: '<script>alert(1)</script>', amount: 500 },
+                        ],
+                        discount_percent: 0,
+                        discount_amount: 0,
+                        net_amount: 3500,
+                        paid_amount: 0,
+                    },
+                },
+            }) as never,
+        );
+
+        expect(html).not.toContain('<script>alert(1)</script>');
+        expect(html).toContain('&lt;script&gt;');
+    });
+
     it('lists every ordered line with its size and quantity', () => {
         const html = printedHtml();
 
@@ -339,99 +405,101 @@ describe('counter work-sheet PDF', () => {
         expect(html).toContain('4');
     });
 
-    it('prints the shirt and pants specification that was saved', () => {
+    /**
+     * The spec is read on screen, where there is room to lay it out properly
+     * and to mark what differs between sheets. It used to print as well, and
+     * it was the one thing that could push the receipt onto a second sheet —
+     * a bill with six differing sheets printed six blocks of twenty settings.
+     *
+     * The receipt is what the customer signs for, so it carries the job, the
+     * artwork, the sizes and the money, and leaves the sewing instructions to
+     * the production sheets that the floor actually works from.
+     */
+    it('leaves the specification off the printed receipt', () => {
         const html = printedHtml();
 
-        expect(html).toContain('แพทเทิร์นมาตรฐาน');
-        expect(html).toContain('ขาว');
-        expect(html).toContain('ขาตรง');
+        // Values that are plainly on the saved spec of this bill.
+        expect(html).not.toContain('แพทเทิร์นมาตรฐาน');
+        expect(html).not.toContain('ขาตรง');
+
+        // And the headings that framed them.
+        expect(html).not.toContain('สเปกเสื้อ');
+        expect(html).not.toContain('สเปกกางเกง');
+        expect(html).not.toContain('spec-section');
+        expect(html).not.toContain('spec-card');
     });
 
     /**
-     * The spec prints two settings to a row. The two placket colours are read
-     * as one setting, so they must share a row whatever comes before them —
-     * on screen they sit one under the other, and the paper must not split
-     * them across a row end.
+     * A short bill left the signatures and the red warning riding up under its
+     * last table, with the rest of the paper blank below them. They close the
+     * document, so they belong at the foot of the sheet where someone signing
+     * looks for them — the sheet is as tall as the page and pushes them down to
+     * it, and a bill long enough to fill the page has no spare room to push
+     * them into and simply closes under its last table.
      */
-    describe('the placket colours on the printed spec', () => {
-        const spec = (labels: string[]) =>
-            labels.map((label, index) => ({ label, value: `ค่า${index}` }));
+    it('holds the signatures and the warning at the foot of the sheet', () => {
+        const html = printedHtml();
 
-        /** Each printed spec row as its labels, left cell then right cell. */
-        const printedSpecRows = (html: string): string[][] =>
-            [...html.matchAll(/<tr class="spec-row">([\s\S]*?)<\/tr>/g)].map(
-                (match) =>
-                    [
-                        ...match[1].matchAll(
-                            /<td class="spec-label">(.*?)<\/td>/g,
-                        ),
-                    ].map((cell) => cell[1]),
-            );
+        expect(html).toContain('class="sheet-foot"');
+        expect(html).toContain('.sheet-foot { margin-top: auto; }');
+        expect(html).toMatch(
+            /\.page \{[^}]*display: flex[^}]*flex-direction: column/,
+        );
+    });
 
-        const shirtRowsFor = (labels: string[]) =>
-            printedSpecRows(
-                printedHtml(
-                    makeRow({
-                        details: {
-                            ...makeRow().details,
-                            spec_sections: { shirt: spec(labels), pants: [] },
-                        },
-                    }),
-                ),
-            );
+    /**
+     * Sized to exactly the 283mm a 7mm margin leaves, the sheet spilled and
+     * printed its signatures alone on a second, otherwise empty page. The
+     * height has to sit under the mark, not level with it.
+     */
+    it('leaves the page a little slack rather than asking for all of it', () => {
+        const html = printedHtml();
+        const printable = 297 - 7 * 2;
+        const minHeight = Number(
+            /\.page \{[^}]*min-height: (\d+)mm/.exec(html)?.[1],
+        );
 
-        it('keeps them side by side when they already start a row', () => {
-            const rows = shirtRowsFor([
-                'แพทเทิร์น',
-                'เนื้อผ้า',
-                'สีสาบ (ใน)',
-                'สีสาบ (นอก)',
-                'ปลายแขน',
-            ]);
+        expect(minHeight).toBeLessThan(printable);
+        expect(minHeight).toBeGreaterThanOrEqual(printable - 6);
+    });
 
-            expect(rows).toEqual([
-                ['แพทเทิร์น', 'เนื้อผ้า'],
-                ['สีสาบ (ใน)', 'สีสาบ (นอก)'],
-                ['ปลายแขน', ''],
-            ]);
-        });
+    /**
+     * Artwork is not required to open a bill — plenty are taken from a sample
+     * or a description — so the receipt has to say so rather than print a row
+     * of empty grey boxes that read as artwork that failed to come out.
+     */
+    it('draws a placeholder on a bill that carries no artwork', () => {
+        const html = printedHtml();
 
-        it('moves the next single setting up so the pair can take a whole row', () => {
-            const rows = shirtRowsFor([
-                'แพทเทิร์น',
-                'เนื้อผ้า',
-                'แบบสาบ',
-                'สีสาบ (ใน)',
-                'สีสาบ (นอก)',
-                'ปลายแขน',
-                'สาบนอก',
-            ]);
+        expect(html).toContain('class="image-card is-empty"');
+        expect(html).toContain('ไม่ได้แนบรูปภาพ');
+        // Drawn, not written: a line of text alone reads like a fault.
+        expect(html).toMatch(/is-empty[\s\S]{0,400}<svg/);
+        expect(html).toContain('.image-card.is-empty');
+    });
 
-            expect(rows).toEqual([
-                ['แพทเทิร์น', 'เนื้อผ้า'],
-                ['แบบสาบ', 'ปลายแขน'],
-                ['สีสาบ (ใน)', 'สีสาบ (นอก)'],
-                ['สาบนอก', ''],
-            ]);
-        });
+    it('draws no placeholder once the bill has a picture', () => {
+        const html = printedHtml(
+            makeRow({
+                details: {
+                    ...makeRow().details,
+                    shirt_artwork_urls: ['/a.webp'],
+                },
+            }),
+        );
 
-        it('leaves the slot blank rather than split the pair when nothing can move up', () => {
-            const rows = shirtRowsFor(['แบบสาบ', 'สีสาบ (ใน)', 'สีสาบ (นอก)']);
+        expect(html).toContain('/a.webp');
+        expect(html).not.toContain('class="image-card is-empty"');
+        expect(html).not.toContain('ไม่ได้แนบรูปภาพ');
+    });
 
-            expect(rows).toEqual([
-                ['แบบสาบ', ''],
-                ['สีสาบ (ใน)', 'สีสาบ (นอก)'],
-            ]);
-        });
+    it('still prints everything the customer signs for', () => {
+        const html = printedHtml();
 
-        it('changes nothing when only one of the two colours was saved', () => {
-            const rows = shirtRowsFor(['แบบสาบ', 'สีสาบ (ใน)', 'ปลายแขน']);
-
-            expect(rows).toEqual([
-                ['แบบสาบ', 'สีสาบ (ใน)'],
-                ['ปลายแขน', ''],
-            ]);
-        });
+        expect(html).toContain('ใบรับงาน');
+        expect(html).toContain('ลงชื่อผู้สั่งสินค้า');
+        expect(html).toContain('ลงชื่อผู้รับงาน');
+        expect(html).toContain('image-gallery');
     });
 
     it('escapes customer text instead of letting it break the markup', () => {
@@ -864,44 +932,58 @@ describe('counter work-sheet PDF', () => {
         expect(html).toContain(`297 - (${margin} * 2)`);
     });
 
-    it('prints the artwork at one fixed height on every sheet', () => {
+    it('prints the artwork at the same height on every sheet it fits on', () => {
         const html = printedHtml();
 
-        // One height on every bill, never trimmed: a receipt that needs more
-        // room takes another page rather than shrinking its picture.
+        // Every bill starts at the same height, so two receipts printed one
+        // after the other look alike rather than one carrying a poster and the
+        // next a stamp.
         expect(html).toContain('var FIXED = 58');
         expect(html).toContain('--artwork-h: 58mm');
-        expect(html).not.toContain('var MIN =');
+
+        // A bill that would run over gives this back before it gives back the
+        // figures, and only down to a size still worth looking at.
+        expect(html).toContain('var ART_MIN = 26');
         expect(html).not.toContain('var MIN_SCALE');
     });
 
     it('measures the same layout that comes out of the printer', () => {
         const html = printedHtml();
 
-        // The spec block sat in one column on screen and two under @media print.
-        // The fitter measures this window, so it sized the artwork against a
-        // block 46mm taller than the one that actually printed: the picture came
-        // out trimmed with a band of empty paper below it.
-        expect(html).toContain(
-            '.spec-sections.has-two { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }',
-        );
-        expect(html).not.toMatch(
-            /@media print \{[^}]*\.spec-sections\.has-two/s,
-        );
-        expect(html).not.toMatch(/@media print \{[^}]*\.job-value/s);
+        // The fitter measures the window it opened, so anything that only
+        // takes effect under @media print is a size it never saw. The spec
+        // block used to do exactly that — one column on screen, two on paper —
+        // and the artwork was sized against a block 46mm taller than the one
+        // that printed, so the picture came out trimmed above empty paper.
+        for (const selector of [
+            '.image-gallery',
+            '.image-card',
+            '.size-table',
+            '.job-value',
+        ]) {
+            expect(html).not.toMatch(
+                new RegExp(
+                    `@media print \\{[^}]*\\${selector.replace('.', '.')}`,
+                    's',
+                ),
+            );
+        }
     });
 
     /**
-     * A bill names a spec for every garment type it sells and all of them
-     * belong on the receipt, so a long one is allowed the pages it needs.
-     * Nothing is trimmed and nothing is scaled to avoid a page break.
+     * The sheet aims at one A4 page and trims to reach it, but only the two
+     * things that can be given back without the receipt becoming unreadable,
+     * and only as far as their floors. It is never scaled and never clipped:
+     * a bill longer than the floors can save takes the page it needs.
      */
-    it('takes another page rather than shrinking anything to avoid one', () => {
+    it('trims to stay on the page, but never scales or clips', () => {
         const html = printedHtml();
 
-        expect(html).not.toContain('while (height < FIXED)');
+        expect(html).toContain('var ART_MIN');
+        expect(html).toContain('var FONT_MIN');
         expect(html).not.toContain('page.style.transform');
         expect(html).not.toContain("document.body.style.overflow = 'hidden'");
+        expect(html).not.toContain('style.zoom');
     });
 
     const rosterRow = () =>
@@ -1103,6 +1185,29 @@ describe('counter work-sheet PDF', () => {
         expect(html).not.toContain('<th>แขน</th>');
     });
 
+    it('counts the legs of the people who ordered trousers, and no one else', () => {
+        // A keeper in a shirt alone is not one more pair of shorts.
+        const html = rosterHtml(
+            lengthRow(
+                {
+                    shirt_style: 'short',
+                    pants_style: 'short',
+                    pants_quantity: 1,
+                },
+                {
+                    shirt_style: 'short',
+                    pants_style: 'short',
+                    pants_quantity: 0,
+                    pants_size: '',
+                    pants_number: '',
+                },
+            ),
+        );
+
+        expect(html).toContain('ขาสั้น 1 คน');
+        expect(html).not.toContain('ขาสั้น 2 คน');
+    });
+
     it('leaves a bill saved before lengths existed exactly as it was', () => {
         const html = rosterHtml(lengthRow({}, {}));
 
@@ -1218,6 +1323,94 @@ describe('counter work-sheet PDF', () => {
         expect(html).toContain('setTimeout(go, 3000)');
     });
 
+    /**
+     * The customer's copy is checked against the floor's, so both are read in
+     * one order: kids before adults, small sizes before large, then numbers.
+     */
+    const mixedRosterRow = () =>
+        makeRow({
+            details: {
+                personalization_rows: [
+                    {
+                        role: 'player' as const,
+                        name: 'ผู้ใหญ่เอ็ม',
+                        size_group: 'adults' as const,
+                        size: 'M',
+                        number: '9',
+                        quantity: 1,
+                        unit_price: 0,
+                        total_price: 0,
+                    },
+                    {
+                        role: 'player' as const,
+                        name: 'เด็กเจเอ็ม',
+                        size_group: 'kids' as const,
+                        size: 'JM',
+                        number: '10',
+                        quantity: 1,
+                        unit_price: 0,
+                        total_price: 0,
+                    },
+                    {
+                        role: 'player' as const,
+                        name: 'เด็กเจเอส',
+                        size_group: 'kids' as const,
+                        size: 'JS',
+                        number: '4',
+                        quantity: 1,
+                        unit_price: 0,
+                        total_price: 0,
+                    },
+                    {
+                        role: 'player' as const,
+                        name: 'ผู้ใหญ่เอส',
+                        size_group: 'adults' as const,
+                        size: 'S',
+                        number: '2',
+                        quantity: 1,
+                        unit_price: 0,
+                        total_price: 0,
+                    },
+                    {
+                        role: 'player' as const,
+                        name: 'เด็กเจเอ็มสอง',
+                        size_group: 'kids' as const,
+                        size: 'JM',
+                        number: '2',
+                        quantity: 1,
+                        unit_price: 0,
+                        total_price: 0,
+                    },
+                ],
+            },
+        });
+
+    it('reads kids first, then size, then number', () => {
+        const html = rosterHtml(mixedRosterRow());
+        const order = [
+            'เด็กเจเอส',
+            'เด็กเจเอ็มสอง',
+            'เด็กเจเอ็ม',
+            'ผู้ใหญ่เอส',
+            'ผู้ใหญ่เอ็ม',
+        ];
+        const positions = order.map((name) => html.indexOf(name));
+
+        expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    });
+
+    it('says how many of each size each group takes, and the whole sheet', () => {
+        const html = rosterHtml(mixedRosterRow());
+
+        // The summary is a table: a row per group, its sizes as chips, the
+        // group's own total, then the sheet's.
+        expect(html).toContain('สรุปจำนวนตามไซซ์');
+        expect(html).toContain('<b>JS</b>1');
+        expect(html).toContain('<b>JM</b>2');
+        expect(html).toContain('รวมทั้งสิ้น');
+        expect(html).toContain('<strong>5</strong> ตัว');
+    });
+
     it('repeats the bill it belongs to on every printed page', () => {
         const html = rosterHtml();
 
@@ -1272,24 +1465,44 @@ describe('counter work-sheet PDF', () => {
         expect(html).toContain('/house-b.webp');
     });
 
-    it('keeps the columns at least as wide as the artwork is tall', () => {
-        const html = printedHtml();
+    it('fits four pictures across the first row', () => {
+        const html = printedHtml(
+            makeRow({
+                details: {
+                    ...makeRow().details,
+                    shirt_artwork_urls: ['/a.webp', '/b.webp', '/c.webp'],
+                    pants_artwork_urls: ['/d.webp', '/e.webp', '/f.webp'],
+                },
+            }),
+        );
 
-        // With a 140px minimum, six artworks squeezed into five columns 38mm
-        // wide and printed at 36x31mm inside a 58mm tall box -- mostly grey.
-        // Tying the minimum to the artwork height gives three columns and a
-        // 56x48mm picture on exactly the same amount of paper.
-        expect(html).toContain(
+        // The artwork height was settled on at four across. The columns were
+        // auto-fit over a minimum as wide as that height, and 58mm into the
+        // 196mm the margins leave only ever divided three ways — so the row
+        // came out one picture short of what it was measured for. This bill
+        // has six, which is more than a row.
+        expect(html).toContain('grid-template-columns: repeat(4, 1fr)');
+        expect(html).not.toContain(
             'grid-template-columns: repeat(auto-fit, minmax(var(--artwork-col), 1fr))',
         );
-        // --artwork-col stays at the full height while --artwork-h is trimmed:
-        // tying the width to the trimmed height narrowed the columns at the same
-        // time, so a busy sheet shrank the pictures twice over.
-        expect(html).toContain('--artwork-col: 58mm');
         expect(html).not.toContain('minmax(140px, 1fr)');
+
         // And a bill with a single artwork must not stretch it into a banner
         // the width of the sheet.
         expect(html).toContain('max-width: calc(var(--artwork-col) * 1.6)');
+    });
+
+    it('gives a bill with fewer pictures only the columns it fills', () => {
+        expect(
+            printedHtml(
+                makeRow({
+                    details: {
+                        ...makeRow().details,
+                        shirt_artwork_urls: ['/a.webp', '/b.webp'],
+                    },
+                }),
+            ),
+        ).toContain('grid-template-columns: repeat(2, 1fr)');
     });
 
     it('gives every picture the same height whatever its proportions', () => {
@@ -1747,6 +1960,57 @@ describe('counter work-sheet PDF', () => {
         ).toBeInTheDocument();
     });
 
+    /**
+     * The print window shares this page's renderer, and the print dialog it
+     * raises blocks the lot. On a bill with no artwork there is nothing to wait
+     * for, so the window printed the instant it was written — inside the click
+     * handler, before the line that closes this dialog had run. Everything
+     * froze with the dialog still on the screen and neither of its buttons
+     * answering, until somebody dismissed the printer. A bill carrying pictures
+     * waited for them to load and closed cleanly, which is why it only happened
+     * to some bills.
+     *
+     * So the dialog goes first and the window is opened after, once the browser
+     * has had a frame to take it off the screen.
+     */
+    it('closes the saved-order dialog before it opens the print window', async () => {
+        renderCounter(makeRow() as never, { savedOrderCode: 'ORD-2026-00042' });
+
+        let dialogWhenTheWindowOpened: boolean | null = null;
+
+        vi.spyOn(window, 'open').mockImplementation(() => {
+            dialogWhenTheWindowOpened = Boolean(
+                screen.queryByText('บันทึกใบสั่งผลิตสำเร็จ'),
+            );
+
+            return null;
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /พิมพ์ PDF/ }));
+
+        // Gone from the screen as soon as the click is handled.
+        expect(
+            screen.queryByText('บันทึกใบสั่งผลิตสำเร็จ'),
+        ).not.toBeInTheDocument();
+
+        await waitFor(() => {
+            expect(dialogWhenTheWindowOpened).not.toBeNull();
+        });
+
+        // And gone before the window that may freeze everything was opened.
+        expect(dialogWhenTheWindowOpened).toBe(false);
+    });
+
+    it('closes the dialog when the counter says not yet', () => {
+        renderCounter(makeRow() as never, { savedOrderCode: 'ORD-2026-00042' });
+
+        fireEvent.click(screen.getByRole('button', { name: 'ยังไม่พิมพ์' }));
+
+        expect(
+            screen.queryByText('บันทึกใบสั่งผลิตสำเร็จ'),
+        ).not.toBeInTheDocument();
+    });
+
     it('stays quiet when the redirect carries no saved order', () => {
         renderCounter(makeRow() as never);
 
@@ -1796,13 +2060,14 @@ describe('counter work-sheet PDF', () => {
         });
     });
 
-    it('never tightens the size table to buy room', () => {
+    it('tightens the size table only after the artwork has given way', () => {
         const html = printedHtml();
 
-        // Figures on a receipt are read by a customer. They keep one size
-        // however long the bill runs.
-        expect(html).not.toContain('var FONT_MIN');
-        expect(html).not.toContain('tight > FONT_MIN');
+        // Figures on a receipt are read by a customer, so they are the last
+        // thing to give and they stop while they are still legible — the
+        // picture is only a reminder of what was ordered and goes first.
+        expect(html).toContain('var FONT_MIN = 8');
+        expect(html).toMatch(/art > ART_MIN[\s\S]*small > FONT_MIN/);
     });
 
     it('merges the job and payment details into one block', () => {
@@ -2104,17 +2369,46 @@ describe('counter work-sheet PDF', () => {
         );
     });
 
-    it('numbers the pages of a receipt that runs to more than one', () => {
+    /**
+     * The bill used to name itself at the foot of every page, drawn out of the
+     * flow at a position worked out from the page height. The flow knew
+     * nothing about it: on a bill carrying every size in all three ranges it
+     * was painted over four size rows, measured at four to nine pixels of
+     * overlap, and a white background meant those figures were not on the
+     * paper at all.
+     *
+     * There is no way to reserve a strip at the foot of every page of a
+     * continuous flow that CSS will honour — a page margin wide enough to hold
+     * it is a margin the browser will not draw into — and Chrome counts pages
+     * only inside @page rules it does not implement. So the strip is gone
+     * rather than wrong, and the bill names itself once where it closes.
+     */
+    it('names the bill once at the close, not over every page', () => {
         const html = printedHtml();
 
-        // Every page says which bill it belongs to; a receipt of several says
-        // which page of how many, so a customer can see none is missing. A
-        // single page needs no numbering and gets none.
-        expect(html).toContain('class="print-runner"');
-        expect(html).toContain("'หน้า ' + (i + 1) + '/' + total");
-        expect(html).toContain('total > 1');
-        // Out of flow, so placing them cannot itself add a page.
-        expect(html).toContain('position: absolute;');
+        expect(html).toContain('class="sheet-mark"');
+        expect(html).toContain('— จบเอกสาร —');
+
+        // Nothing is drawn at a position worked out from the page height any
+        // more, which is what put it on top of the rows.
+        expect(html).not.toContain('print-runner');
+        expect(html).not.toContain("'หน้า ' + (i + 1) + '/' + total");
+    });
+
+    /**
+     * It closes the document, so it belongs with the signatures and the
+     * warning — inside the block that is held at the foot of the sheet, not
+     * loose after it.
+     */
+    it('keeps the closing mark with the signatures it closes', () => {
+        const html = printedHtml();
+        const foot = html.indexOf('class="sheet-foot"');
+        const mark = html.indexOf('class="sheet-mark"');
+        const footEnds = html.indexOf('</div>', html.indexOf('warning-banner'));
+
+        expect(foot).toBeGreaterThan(-1);
+        expect(mark).toBeGreaterThan(foot);
+        expect(mark).toBeGreaterThan(footEnds - 1);
     });
 
     it('never clips rows off an order too large to fit one page', () => {
@@ -2180,5 +2474,208 @@ describe('counter work-sheet PDF', () => {
         expect(printSpy).toHaveBeenCalledTimes(1);
 
         vi.useRealTimers();
+    });
+});
+
+describe('the sports-day grid on the receipt', () => {
+    const sportsDayRow = () =>
+        makeRow({
+            details: {
+                size_mode: 'sports_day',
+                items: [],
+                sports_day_groups: [
+                    {
+                        team_name: 'สีฟ้าใส',
+                        color_name: '',
+                        rows: [
+                            {
+                                size_group: 'kids',
+                                size_label: 'JS',
+                                shirt_qty: 100,
+                                shirt_price: 169,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                        ],
+                    },
+                    {
+                        team_name: 'แดงมรกด',
+                        color_name: '',
+                        rows: [
+                            {
+                                size_group: 'kids',
+                                size_label: 'JS',
+                                shirt_qty: 100,
+                                shirt_price: 159,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                            {
+                                size_group: 'kids',
+                                size_label: 'JL',
+                                shirt_qty: 100,
+                                shirt_price: 159,
+                                pants_qty: 0,
+                                pants_price: 0,
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('prints one price per size, the dearer one, and no money under each house', () => {
+        const html = printedHtml(sportsDayRow());
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const table = doc.querySelector('.sd-table');
+
+        expect(table).not.toBeNull();
+        expect(html).not.toContain('159.00-169.00');
+        expect(
+            [...table!.querySelectorAll('tbody td.sd-price')].map((cell) =>
+                cell.textContent?.trim(),
+            ),
+        ).toEqual(['169.00', '159.00']);
+
+        const money = table!.querySelector('tr.sd-foot-money')!;
+        const cells = [...money.querySelectorAll('td')].map((cell) =>
+            cell.textContent?.trim(),
+        );
+
+        // รวมเงิน, two blank house cells, the blank price span, the total.
+        expect(cells).toEqual(['รวมเงิน', '', '', '', '48,700.00']);
+        expect(money.textContent).not.toContain('16,900.00');
+        expect(money.textContent).not.toContain('31,800.00');
+    });
+
+    it('shows the same on the screen', () => {
+        openDetail(sportsDayRow());
+
+        const label = screen.getAllByText('รวมเงิน').at(-1)!;
+        const row = label.closest('tr')!;
+
+        expect(row.textContent).not.toContain('16,900.00');
+        expect(row.textContent).not.toContain('31,800.00');
+        expect(row.textContent).toContain('48,700.00');
+        expect(screen.queryByText('159.00-169.00')).toBeNull();
+    });
+});
+
+describe('the work receipt dialog on the counter', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('writes the bill dates the way the counter list does', () => {
+        openDetail(
+            makeRow({
+                details: {
+                    billing_date: '2026-10-22 11:06:03',
+                    due_date: '2026-10-31 00:00:00',
+                    branch_name: 'ศรีบุญเรือง',
+                },
+            }),
+        );
+
+        const billInfo = screen
+            .getAllByText(/วันที่เปิดบิล:/)
+            .map((element) => element.textContent ?? '');
+        const dueInfo = screen
+            .getAllByText(/วันที่รับสินค้า:/)
+            .map((element) => element.textContent ?? '');
+
+        expect(billInfo).toContain('วันที่เปิดบิล: 22/10/2569 11:06 น.');
+        expect(dueInfo).toContain('วันที่รับสินค้า: 31/10/2569');
+        expect(document.body.textContent).not.toContain('2026-10-22 11:06:03');
+    });
+
+    it('names the branch right after ใบรับงาน in its heading', () => {
+        openDetail(
+            makeRow({
+                details: { branch_name: 'ศรีบุญเรือง' },
+            }),
+        );
+
+        const heading = screen.getByRole('heading', { name: /^ใบรับงาน/ });
+
+        expect(heading.textContent?.replace(/\s+/g, ' ')).toMatch(
+            /^ใบรับงาน : สาขาศรีบุญเรือง \S+$/,
+        );
+    });
+});
+
+describe('a bill whose delivery date was moved', () => {
+    const moved = () =>
+        makeRow({
+            due_date: '2026-11-05',
+            details: {
+                due_date: '2026-11-05 00:00:00',
+                can_reschedule: true,
+                postponed_from: '2026-10-28',
+                due_date_changes: [
+                    {
+                        from: '2026-10-28',
+                        to: '2026-11-05',
+                        reason: 'ลูกค้าขอเลื่อน',
+                        by: 'สมชาย',
+                        at: '2026-10-24 10:15:00',
+                    },
+                ],
+            },
+        });
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        Element.prototype.scrollTo =
+            Element.prototype.scrollTo ?? (() => undefined);
+        vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(
+            () => undefined,
+        );
+    });
+
+    it('shows the new date with where it moved from on the bill', () => {
+        openDetail(moved());
+
+        const due = screen
+            .getAllByText(/วันที่รับสินค้า:/)
+            .map((element) => element.textContent ?? '');
+
+        expect(due).toContain(
+            'วันที่รับสินค้า: 05/11/2569(เลื่อนจาก 28/10/2569)',
+        );
+    });
+
+    it('prints where the date moved from on the receipt', () => {
+        const html = printedHtml(moved());
+
+        expect(html).toContain('(เลื่อนจาก 28/10/2569)');
+    });
+
+    it('lists each move, with its reason, in the timeline', () => {
+        renderCounter(moved());
+        fireEvent.click(screen.getAllByRole('button', { name: /ไทม์ไลน์/ })[0]);
+
+        expect(screen.getByText('ประวัติการเลื่อนส่ง')).toBeInTheDocument();
+        expect(
+            screen.getByText(/28\/10\/2569 → 05\/11\/2569/),
+        ).toBeInTheDocument();
+        expect(screen.getByText('เหตุผล: ลูกค้าขอเลื่อน')).toBeInTheDocument();
+        expect(
+            screen.getByText(/โดย สมชาย · 24\/10\/2569 10:15 น\./),
+        ).toBeInTheDocument();
     });
 });

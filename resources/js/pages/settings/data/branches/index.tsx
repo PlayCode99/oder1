@@ -13,6 +13,11 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import {
+    BRANCH_HEADER_COLOR_OPTIONS,
+    DEFAULT_BRANCH_HEADER_COLOR,
+    normalizeBranchHeaderColor,
+} from '@/lib/branchHeaderColor';
 
 type BranchRow = {
     id: number;
@@ -20,6 +25,7 @@ type BranchRow = {
     branch_name: string;
     phone: string;
     address: string;
+    header_color: string;
 };
 
 type BranchFormData = {
@@ -27,6 +33,7 @@ type BranchFormData = {
     branch_name: string;
     phone: string;
     address: string;
+    header_color: string;
 };
 
 type Props = {
@@ -38,7 +45,68 @@ const EMPTY_FORM: BranchFormData = {
     branch_name: '',
     phone: '',
     address: '',
+    header_color: DEFAULT_BRANCH_HEADER_COLOR,
 };
+
+/**
+ * The colour this branch's job sheets and receipts are headed in, picked from
+ * the shop's set so every branch stays readable in print.
+ */
+function HeaderColorPicker({
+    value,
+    onChange,
+    error,
+}: {
+    value: string;
+    onChange: (color: string) => void;
+    error?: string;
+}) {
+    const selected = normalizeBranchHeaderColor(value).toUpperCase();
+
+    return (
+        <div className="space-y-1.5">
+            <p className="text-sm font-medium text-slate-700">สีหัวเอกสาร</p>
+            <div
+                role="radiogroup"
+                aria-label="สีหัวเอกสาร"
+                className="flex flex-wrap gap-2"
+            >
+                {BRANCH_HEADER_COLOR_OPTIONS.map((option) => {
+                    const isSelected = option.value.toUpperCase() === selected;
+
+                    return (
+                        <button
+                            key={option.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            onClick={() => onChange(option.value)}
+                            className={
+                                isSelected
+                                    ? 'flex items-center gap-2 rounded-lg border-2 border-slate-900 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-900'
+                                    : 'flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:border-slate-400'
+                            }
+                        >
+                            <span
+                                aria-hidden="true"
+                                className="size-4 rounded"
+                                style={{ backgroundColor: option.value }}
+                            />
+                            {option.label}
+                        </button>
+                    );
+                })}
+            </div>
+            <div
+                className="mt-1 rounded-md px-3 py-1.5 text-xs font-semibold text-white"
+                style={{ backgroundColor: selected }}
+            >
+                ตัวอย่างหัวใบรับงาน
+            </div>
+            <InputError message={error} />
+        </div>
+    );
+}
 
 export default function BranchesPage({ branches }: Props) {
     const [searchTerm, setSearchTerm] = useState('');
@@ -79,6 +147,7 @@ export default function BranchesPage({ branches }: Props) {
             branch_name: branch.branch_name,
             phone: branch.phone,
             address: branch.address,
+            header_color: branch.header_color || DEFAULT_BRANCH_HEADER_COLOR,
         });
         editForm.clearErrors();
         setIsEditOpen(true);
@@ -194,6 +263,9 @@ export default function BranchesPage({ branches }: Props) {
                                     <th className="px-4 py-3 text-left font-semibold text-slate-700">
                                         ที่อยู่
                                     </th>
+                                    <th className="px-4 py-3 text-left font-semibold text-slate-700">
+                                        สีหัวเอกสาร
+                                    </th>
                                     <th className="px-4 py-3 text-right font-semibold text-slate-700">
                                         การจัดการ
                                     </th>
@@ -218,6 +290,27 @@ export default function BranchesPage({ branches }: Props) {
                                         </td>
                                         <td className="px-4 py-3 text-slate-700">
                                             {branch.address || '-'}
+                                        </td>
+                                        <td className="px-4 py-3">
+                                            <span className="inline-flex items-center gap-2 text-xs text-slate-700">
+                                                <span
+                                                    aria-hidden="true"
+                                                    className="size-4 rounded"
+                                                    style={{
+                                                        backgroundColor:
+                                                            normalizeBranchHeaderColor(
+                                                                branch.header_color,
+                                                            ),
+                                                    }}
+                                                />
+                                                {BRANCH_HEADER_COLOR_OPTIONS.find(
+                                                    (option) =>
+                                                        option.value.toUpperCase() ===
+                                                        normalizeBranchHeaderColor(
+                                                            branch.header_color,
+                                                        ).toUpperCase(),
+                                                )?.label ?? 'สีอื่น'}
+                                            </span>
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="flex items-center justify-end gap-2">
@@ -342,6 +435,14 @@ export default function BranchesPage({ branches }: Props) {
                             />
                         </div>
 
+                        <HeaderColorPicker
+                            value={createForm.data.header_color}
+                            onChange={(color) =>
+                                createForm.setData('header_color', color)
+                            }
+                            error={createForm.errors.header_color}
+                        />
+
                         <DialogFooter>
                             <Button
                                 type="submit"
@@ -440,6 +541,14 @@ export default function BranchesPage({ branches }: Props) {
                                 placeholder="ที่อยู่สาขา"
                             />
                         </div>
+
+                        <HeaderColorPicker
+                            value={editForm.data.header_color}
+                            onChange={(color) =>
+                                editForm.setData('header_color', color)
+                            }
+                            error={editForm.errors.header_color}
+                        />
 
                         <DialogFooter>
                             <Button

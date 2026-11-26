@@ -9,6 +9,7 @@ use App\Enums\SizeTier;
 use App\Models\GarmentOperation;
 use App\Models\GarmentType;
 use App\Models\Order;
+use App\Support\Orders\GarmentStyles;
 use Illuminate\Support\Collection;
 
 /**
@@ -265,26 +266,22 @@ trait ProductionCostCalculation
     }
 
     /**
-     * Production splits the work by sleeve and leg length as well as by garment
-     * and size group, so each batch gets its own sheet on the floor. Rows saved
-     * before order_items carried a style land in 'unspecified' rather than being
-     * guessed into one of the real batches.
-     *
-     * @var list<string>
-     */
-    private const PRODUCTION_GROUP_STYLES = ['short', 'long', 'sleeveless', 'unspecified'];
-
-    /**
-     * The lengths a garment can be cut in. Trousers are never sleeveless, and
-     * carrying the batch would offer the floor a sheet nobody can sew.
+     * The lengths a garment can be cut in, read from the shop's own list.
+     * Production splits the work by length as well as by garment and size
+     * group, so each one gets its own sheet on the floor; a line saved
+     * before lengths were recorded lands in 'unspecified' rather than
+     * being guessed into a real batch.
      *
      * @return list<string>
      */
     private function productionStylesFor(string $garment): array
     {
-        return $garment === 'pants'
-            ? ['short', 'long', 'unspecified']
-            : self::PRODUCTION_GROUP_STYLES;
+        // Whatever lengths the shop sells for this garment, plus the catch-all
+        // for lines recorded before lengths existed.
+        return [
+            ...GarmentStyles::codes($garment === 'pants' ? 'PANTS' : 'SHIRT'),
+            'unspecified',
+        ];
     }
 
     /** @var array<string, string> */
@@ -297,16 +294,13 @@ trait ProductionCostCalculation
         'pants_adults' => 'กางเกงผู้ใหญ่',
     ];
 
-    /** @var array<string, array<string, string>> */
-    private const PRODUCTION_STYLE_LABELS = [
-        'shirt' => ['short' => 'แขนสั้น', 'long' => 'แขนยาว', 'sleeveless' => 'แขนกุด', 'unspecified' => 'ไม่ระบุแขน'],
-        'pants' => ['short' => 'ขาสั้น', 'long' => 'ขายาว', 'unspecified' => 'ไม่ระบุขา'],
-    ];
-
     /**
-     * One operation per entry, with the rates that price it. Long prices stay
-     * null when the shop has not set them, so unitTotalForBatch() can tell
-     * "not priced separately" apart from "free".
+     * One operation per entry, with the rate that prices it.
+     *
+     * There used to be a second rate per size group, for when the garment was
+     * a long one. A garment type carries its own length now, and the order
+     * form will only offer a long one for a long sheet, so the rate on the
+     * operation is already the rate for the length it is cut at.
      *
      * @return list<array<string, mixed>>
      */
@@ -317,8 +311,6 @@ trait ProductionCostCalculation
                 'name' => $operation->name,
                 'child_price' => (float) ($operation->child_price ?? 0),
                 'adult_price' => (float) ($operation->adult_price ?? 0),
-                'child_price_long' => $operation->child_price_long === null ? null : (float) $operation->child_price_long,
-                'adult_price_long' => $operation->adult_price_long === null ? null : (float) $operation->adult_price_long,
             ])
             ->values()
             ->all();
@@ -327,40 +319,37 @@ trait ProductionCostCalculation
     /**
      * The labour cost of one garment in a batch.
      *
-     * Long sleeves and long legs are priced per operation, and an operation the
-     * shop has not priced separately simply costs the same either way. Snapshots
-     * taken before those columns existed carry no long price at all, so they fall
-     * back the same way and already-booked work keeps the cost it was booked at.
+     * A length used to be priced twice: the operation carried an ordinary rate
+     * and a second one for when the garment was long, and this chose between
+     * them by the sheet's style. A garment type carries its own length now and
+     * the order form will only offer a long one for a long sheet, so the rate
+     * on the operation is already the rate for the length being cut — and the
+     * second column was never filled in on a single operation.
+     *
+     * A snapshot taken while it existed still carries the key, holding null in
+     * every one of them, so work booked then costs exactly what it did.
      *
      * @param  Collection<int, mixed>  $components
      */
-    private function unitTotalForBatch(Collection $components, string $sizeGroup, string $style): float
+    private function unitTotalForBatch(Collection $components, string $sizeGroup): float
     {
-        $baseKey = $sizeGroup === 'kids' ? 'child_price' : 'adult_price';
-        $longKey = $sizeGroup === 'kids' ? 'child_price_long' : 'adult_price_long';
+        $rateKey = $sizeGroup === 'kids' ? 'child_price' : 'adult_price';
 
-        return (float) $components->sum(function ($component) use ($baseKey, $longKey, $style): float {
-            if (! is_array($component)) {
-                return 0.0;
-            }
-
-            $base = (float) ($component[$baseKey] ?? 0);
-
-            if ($style !== 'long') {
-                return $base;
-            }
-
-            $long = $component[$longKey] ?? null;
-
-            return is_numeric($long) ? (float) $long : $base;
-        });
+        return (float) $components->sum(
+            fn ($component): float => is_array($component)
+                ? (float) ($component[$rateKey] ?? 0)
+                : 0.0,
+        );
     }
 
     private function normalizeProductionStyle(?string $style): string
     {
         $normalized = mb_strtolower(trim((string) $style));
 
-        return in_array($normalized, ['short', 'long', 'sleeveless'], true) ? $normalized : 'unspecified';
+        return in_array($normalized, GarmentStyles::codes('SHIRT'), true)
+            || in_array($normalized, GarmentStyles::codes('PANTS'), true)
+            ? $normalized
+            : 'unspecified';
     }
 
     /**
@@ -510,23 +499,21 @@ trait ProductionCostCalculation
                         ? collect($batchRate['components'])
                         : $components;
 
-                    $unitTotal = $this->unitTotalForBatch($batchComponents, $pricingGroup, $style);
+                    $unitTotal = $this->unitTotalForBatch($batchComponents, $pricingGroup);
 
                     $groups[] = [
                         'key' => $key,
-                        // The steps this sheet is made of. The costing table on
-                        // a sleeveless sheet must not list a sleeve being
-                        // attached, so each sheet carries its own list rather
-                        // than sharing one per garment.
-                        // The steps this sheet is made of, so a sheet's costing
-                        // table is read against the work it actually names.
+                        // The steps this sheet is made of. A แขนกุด sheet's
+                        // costing table must not list a sleeve being attached,
+                        // so each sheet carries its own list rather than
+                        // sharing one per garment.
                         'components' => $batchComponents->all(),
                         // What the floor is making on this sheet, which is not
                         // always what the rest of the bill is making.
                         'garment_type_name' => $batchRate['type_name']
                             ?? ($garment === 'pants' ? $pantsTypeName : $shirtTypeName),
                         'label' => self::PRODUCTION_GROUP_BASE_LABELS[$garment.'_'.$tier->value]
-                            .' '.self::PRODUCTION_STYLE_LABELS[$garment][$style],
+                            .' '.GarmentStyles::label($garment, $style),
                         'garment' => $garment,
                         // Which sheet this batch prints on...
                         'size_tier' => $tier->value,

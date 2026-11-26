@@ -14,6 +14,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property int $id
  * @property string|null $branch_code
  * @property string|null $branch_name
+ * @property string|null $phone
+ * @property string|null $header_color
  */
 class Branch extends Model
 {

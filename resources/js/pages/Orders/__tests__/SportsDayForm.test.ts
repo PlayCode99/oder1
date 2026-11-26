@@ -23,6 +23,7 @@ const group = (rows: ReturnType<typeof row>[], over = {}) => ({
     id: 'g1',
     team_name: 'คณะสีแดง',
     fabric_color_id: '12',
+    display_color: '',
     rows,
     artwork_files: [] as File[],
     saved_artwork: [] as { id: number; url: string }[],
@@ -105,6 +106,7 @@ describe('sports day → order_items', () => {
             {
                 item_type: 'shirt',
                 size_group: 'adults',
+                size_tier: 'adults',
                 size_label: 'M',
                 quantity: 35,
                 unit_price: 200,
@@ -112,9 +114,34 @@ describe('sports day → order_items', () => {
             {
                 item_type: 'pants',
                 size_group: 'adults',
+                size_tier: 'adults',
                 size_label: 'M',
                 quantity: 10,
                 unit_price: 150,
+            },
+        ]);
+    });
+
+    it('sends a ประถม - มัธยมต้น row as its own range, at the child’s rate', () => {
+        const items = buildRequestItemsFromSportsDay([
+            group([
+                row({
+                    size_group: 'junior',
+                    size_label: 'JL',
+                    shirt_qty: 12,
+                    shirt_price: 190,
+                }),
+            ]),
+        ]);
+
+        expect(items).toEqual([
+            {
+                item_type: 'shirt',
+                size_group: 'kids',
+                size_tier: 'junior',
+                size_label: 'JL',
+                quantity: 12,
+                unit_price: 190,
             },
         ]);
     });
@@ -143,15 +170,25 @@ describe('sports day → order_items', () => {
         expect(items.map((i) => i.size_label)).toEqual(['JS', 'L']);
     });
 
-    it('skips rows with no quantity or no price so they never reach the invoice', () => {
+    it('skips a row nothing was counted on, so it never reaches the invoice', () => {
         const items = buildRequestItemsFromSportsDay([
-            group([
-                row({ id: 'a', shirt_qty: 0, shirt_price: 200 }),
-                row({ id: 'b', shirt_qty: 10, shirt_price: 0 }),
-            ]),
+            group([row({ id: 'a', shirt_qty: 0, shirt_price: 200 })]),
         ]);
 
+        // A rate typed against no count is not an order.
         expect(items).toEqual([]);
+    });
+
+    it('bills a house its shirts even when they cost nothing', () => {
+        const items = buildRequestItemsFromSportsDay([
+            group([row({ id: 'b', shirt_qty: 10, shirt_price: 0 })]),
+        ]);
+
+        // Ten shirts the shop is giving away still have to be cut and sewn,
+        // so they go on the bill at ฿0 rather than off it without a word.
+        expect(items).toHaveLength(1);
+        expect(items[0].quantity).toBe(10);
+        expect(items[0].unit_price).toBe(0);
     });
 
     it('totals across colour houses match the sum of the line items', () => {
